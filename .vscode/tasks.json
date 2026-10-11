@@ -1,0 +1,70 @@
+{
+  // See https://go.microsoft.com/fwlink/?LinkId=733558
+  // for the documentation about the tasks.json format
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "assert-license-compliance",
+      "detail": "Assert: Compatibility between project and deps licenses",
+      "type": "shell",
+      "command": "uv run licensecheck --zero --ignore-licenses UNKNOWN --ignore-packages mypy-extensions -g app -g docs",
+      "problemMatcher": []
+    },
+    {
+      "label": "assert-no-vulnerabilities",
+      "detail": "Assert: Vulnerabilities",
+      "type": "shell",
+      "command": "uv run pip-audit .",
+      "problemMatcher": []
+    },
+    {
+      "label": "assert-no-deptry-issues",
+      "detail": "Assert: Unused or undeclared deps",
+      "type": "shell",
+      "command": "uv run deptry .",
+      "problemMatcher": []
+    },
+    {
+      "label": "build-docs",
+      "detail": "Build: Documentation page HTML via MkDocs",
+      "type": "shell",
+      "command": "uv run properdocs build -f ./docs/.config.yml",
+      "problemMatcher": []
+    },
+    {
+      "label": "build-sbom",
+      "detail": "Build: Software Bill Of Materials (SBOM)",
+      "type": "shell",
+      "command": "uv export --format cyclonedx1.5 > SBOM.json",
+      "problemMatcher": []
+    },
+    {
+      "label": "print-outdated-deps",
+      "detail": "Print: List of installed versions & available major upgrades",
+      "type": "shell",
+      "command": "uv tree --depth=1 --outdated --all-groups",
+      "problemMatcher": []
+    },
+    {
+      "label": "update-dependencies",
+      "detail": "Update: Upgrade dependencies and install new ones via uv according to pyproject.toml",
+      "type": "shell",
+      "command": "uv sync --upgrade",
+      "problemMatcher": []
+    },
+    {
+      "label": "serve-docs-dev",
+      "detail": "Serve: Docs pages in development mode with auto-reload",
+      "type": "shell",
+      "command": "uv run properdocs serve -f ./docs/.config.yml --open",
+      "problemMatcher": []
+    },
+    {
+      "label": "serve-docs-prod",
+      "detail": "Serve: Docs pages in production mode",
+      "type": "shell",
+      "command": "uv run properdocs serve -f ./docs/.config.yml --no-livereload",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,127 @@
+[project]
+name = "based-pyproject"
+description = "Repository template for a modern Python development project."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13,<4"
+dependencies = ["structlog>=26.1.0,<27.0.0"]
+dynamic = ["version"]
+
+[build-system]
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+# Everything needed in CI/CD pipelines, which includes all dev dependencies + release tooling.
+ci = [
+    { include-group = "dev" },
+    "pyright[nodejs]>=1.1.409,<2.0.0",
+    "python-semantic-release>=10.6.2,<11.0.0",
+]
+# Linting, testing, documentation, and application tools; Installed per default by uv in development environments.
+dev = [
+    { include-group = "lint" },
+    { include-group = "test" },
+    { include-group = "docs" },
+    { include-group = "app" },
+    "vscode-task-runner>=3.0.1,<4.0.0",
+]
+# Generating, building and serving documentation.
+docs = [
+    "griffe-fieldz>=0.5.0,<0.6.0",
+    "griffe-pydantic>=1.3.1,<2.0.0",
+    "markdown-callouts>=0.4.0,<0.5.0",
+    "markdown-exec>=1.12.1,<2.0.0",
+    "mkdocs-llmstxt>=0.5.0,<0.6.0",
+    "mkdocs-macros-plugin>=1.5.0,<2.0.0",
+    "mkdocs-material>=9.7.6,<10.0.0",
+    "mkdocs-section-index>=0.3.12,<0.4.0",
+    "mkdocstrings[python]>=1.0.4,<2.0.0",
+    "properdocs>=1.6.7,<2.0.0",
+]
+# Code formatters, linters, and dependency checkers.
+lint = [
+    "black>=26.3.1,<27.0.0",
+    "debugpy>=1.8.20",
+    "deptry>=0.25.1,<0.26.0",
+    "licensecheck>=2026.0.8,<2027.0.0",
+    "pip-audit>=2.10.0,<3.0.0",
+    "ruff>=0.16.6,<0.17.0",
+]
+# Everything required to execute code as notebooks or scripts.
+app = [
+    "dotenv>=0.9.9,<0.10.0",
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1,<2.0.0",
+    "jupytext>=1.19.5,<2.0.0",
+    "rich>=15.0.0,<16.0.0",
+]
+# Test runners and coverage tools.
+test = ["pytest>=9.0.3,<10.0.0", "pytest-cov>=7.1.0,<8.0.0"]
+
+[tool.uv]
+add-bounds = "major"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Enable following linters:
+# - pycodestyle (`E`, `W`)
+# - Pyflakes (`F`)
+# - mccabe (`C90`)
+# - pep8-naming (`N`)
+# - pydocstyle (`D`)
+# - pyupgrade (`UP`)
+select = ["E", "W", "F", "C90", "N", "D", "UP"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+"!src/**.py" = ["D"]
+
+[tool.pyright]
+reportMatchNotExhaustive = true
+reportIncompatibleVariableOverride = true
+reportIncompatibleMethodOverride = true
+reportOverlappingOverload = true
+
+[tool.black]
+line-length = 100
+
+[tool.deptry]
+known_first_party = ["based_pyproject"]
+non_dev_dependency_groups = ["app"]
+
+[tool.deptry.per_rule_ignores]
+DEP002 = ["ipykernel", "jupyter", "jupytext", "rich"]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source_dirs = ["src", "app"]
+patch = ["subprocess"]
+branch = true
+
+[tool.semantic_release]
+commit_parser = "emoji"
+allow_zero_version = true
+parse_linked_issues = true
+
+# # Uncomment this when hosting your repo on a ForgeJo or Gitea instance.
+# # Set domain/api_domain if your instance is not derivable from the git origin,
+# # e.g. domain = "codeberg.org".
+# [tool.semantic_release.remote]
+# type = "gitea"
+
+[tool.semantic_release.publish]
+dist_glob_patterns = ["dist/pypi/*"]

@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup uv
+        uses: https://github.com/astral-sh/setup-uv@v10.0.1
+
+      - name: Install dependencies
+        run: uv sync --group ci
+
+      # Forgejo auto-provides secrets.GITHUB_TOKEN like GitHub does.
+      # python-semantic-release expects it as GITEA_TOKEN for gitea-type remotes.
+      - name: Create release version
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run semantic-release version --skip-build --no-commit
+
+      - name: Build package
+        run: uv build --out-dir ./dist/pypi
+
+      - name: Publish release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run semantic-release publish

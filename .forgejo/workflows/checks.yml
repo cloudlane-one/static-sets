@@ -1,0 +1,45 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  checks:
+    name: Checks
+    # Label must match a runner registered on your Forgejo instance.
+    runs-on: ubuntu-latest
+
+    steps:
+      # Absolute action URLs work regardless of the instance's default actions URL.
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v7.0.1
+
+      - name: Setup uv
+        uses: https://github.com/astral-sh/setup-uv@v10.0.1
+
+      - name: Install dependencies
+        run: uv sync --group ci
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+      - name: Run Pyright
+        run: uv run pyright .
+
+      - name: Run Pytest
+        run: uv run pytest tests
+
+      - name: Check if docs build successfully
+        run: uv run vtr build-docs
+
+      - name: Check license compliance
+        run: uv run vtr assert-license-compliance
+
+      - name: Check vulnerabilities
+        run: uv run vtr assert-no-vulnerabilities
+
+      - name: Check unused undeclared deps
+        run: uv run vtr assert-no-deptry-issues

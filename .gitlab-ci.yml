@@ -1,0 +1,80 @@
+# GitLab CI equivalent of the GitHub Actions workflows in .github/workflows/
+# - checks.yml  -> `checks` job (lint, type-check, test, docs build, dependency checks)
+# - release.yml -> `release` job (semantic-release version + PyPI dist build/publish)
+# - pages.yml   -> `pages` job (docs deployment via GitLab Pages instead of `gh-deploy`)
+
+workflow:
+  # Mirror the GitHub triggers: run pipelines on merge requests and pushes to the default branch
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages:
+  - check
+  - release
+  - deploy
+
+default:
+  # Python 3.13 + uv in one image, equivalent to astral-sh/setup-uv.
+  # NOTE: the non-slim variant is required because the slim image has no git,
+  # which semantic-release and uv-dynamic-versioning (git-tag-based versioning) need.
+  image: ghcr.io/astral-sh/uv:python3.13-bookworm
+  # Cache the uv package cache and the mkdocs-material cache between runs
+  # (latter is the equivalent of the weekly ~/.cache cache in pages.yml)
+  cache:
+    key: uv-cache
+    paths:
+      - .uv-cache/
+      - .cache/
+
+variables:
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.uv-cache"
+  UV_LINK_MODE: "copy"
+  XDG_CACHE_HOME: "$CI_PROJECT_DIR/.cache"
+
+checks:
+  stage: check
+  script:
+    - uv sync --group ci
+    - uv run ruff check .
+    - uv run pyright .
+    - uv run pytest tests
+    - uv run vtr build-docs
+    - uv run vtr assert-license-compliance
+    - uv run vtr assert-no-vulnerabilities
+    - uv run vtr assert-no-deptry-issues
+
+release:
+  stage: release
+  # Run immediately, independent of `checks` (mirrors the separate GitHub workflow)
+  needs: []
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    GIT_DEPTH: "0" # full clone, equivalent of fetch-depth: 0
+    # python-semantic-release uses GL_TOKEN to create GitLab releases.
+    # Define a masked CI/CD variable `GL_TOKEN` (project access token with `api` scope).
+  script:
+    - git config user.name "gitlab-ci[bot]"
+    - git config user.email "gitlab-ci@users.noreply.${CI_SERVER_HOST}"
+    - uv sync --group ci
+    - uv run semantic-release version --skip-build --no-commit
+    - uv build --out-dir ./dist/pypi
+    - uv run semantic-release publish
+
+pages:
+  stage: deploy
+  # Run immediately, independent of `checks` (mirrors the separate GitHub workflow)
+  needs: []
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    SITE_URL: "$CI_PAGES_URL" # consumed by `site_url: !ENV SITE_URL` in docs/.config.yml
+  script:
+    - uv sync --group ci
+    - uv run properdocs build -f ./docs/.config.yml
+    # GitLab Pages serves a `public` artifact instead of pushing to a `gh-pages` branch
+    - cp --recursive dist/docs public
+  artifacts:
+    paths:
+      - public

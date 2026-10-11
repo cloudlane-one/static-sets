@@ -1,0 +1,46 @@
+name: Pages Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  pages:
+    name: Pages Deployment
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v7.0.1
+
+      - name: Setup uv
+        uses: https://github.com/astral-sh/setup-uv@v10.0.1
+
+      - name: Install dependencies
+        run: uv sync --group ci
+
+      - name: Configure Git Credentials
+        run: |
+          git config user.name forgejo-actions[bot]
+          git config user.email forgejo-actions[bot]@users.noreply.localhost
+
+      - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
+
+      - uses: https://github.com/actions/cache@v6.1.0
+        with:
+          key: mkdocs-material-${{ env.cache_id }}
+          path: ~/.cache
+          restore-keys: |
+            mkdocs-material-
+
+      # mkdocs gh-deploy is provider-agnostic: it force-pushes the built site
+      # to the gh-pages branch via git. Add --remote-branch if your Forgejo
+      # host serves a different branch (e.g. "pages" on Codeberg Pages).
+      - name: Publish pages
+        run: uv run properdocs gh-deploy -f ./docs/.config.yml --force

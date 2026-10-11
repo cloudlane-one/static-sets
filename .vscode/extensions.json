@@ -1,0 +1,23 @@
+{
+  "recommendations": [
+    "aaron-bond.better-comments",
+    "charliermarsh.ruff",
+    "christian-kohler.path-intellisense",
+    "eamodio.gitlens",
+    "kevinrose.vsc-python-indent",
+    "ms-python.black-formatter",
+    "ms-python.debugpy",
+    "ms-vscode-remote.remote-wsl",
+    "qwtel.sqlite-viewer",
+    "rafaelha.vscode-flamegraph",
+    "redhat.vscode-yaml",
+    "repreng.csv",
+    "seatonjiang.gitmoji-vscode",
+    "tamasfe.even-better-toml",
+    "yzhang.markdown-all-in-one",
+    "irongeek.vscode-env",
+    "ms-toolsai.jupyter-renderers",
+    "caenrigen.jupytext-sync",
+    "ms-python.vscode-pylance"
+  ]
+}

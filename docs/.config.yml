@@ -1,0 +1,151 @@
+site_name: Based PyProject
+docs_dir: .
+site_url: !ENV SITE_URL
+repo_url: "https://github.com/cloudlane-one/based-pyproject"
+repo_name: "cloudlane-one/based-pyproject"
+edit_uri: "-/edit/main/docs/"
+site_dir: ../dist/docs
+use_directory_urls: false
+dev_addr: 127.0.0.1:9000
+
+nav:
+  - Home: index.md
+  - Development:
+      - how-to-contribute.md
+      - how-to-setup-locally.md
+      - how-to-add-dependencies.md
+      - how-to-check-quality.md
+  - Reference:
+      - Python API: ref-python-api.md
+      - ref-directory-structure.md
+      - ref-code-conventions-tooling.md
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+
+theme:
+  name: material
+  logo: img/logo-kit-white.png
+  favicon: img/favicon.ico
+  features:
+    - announce.dismiss
+    - content.action.edit
+    - content.action.view
+    - content.code.annotate
+    - content.code.copy
+    - content.tooltips
+    - navigation.footer
+    - navigation.path
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: lime
+      toggle:
+        icon: material/weather-night
+        name: Switch to system preference
+
+extra_css:
+  - css/mkdocstrings.css
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10.9.0/dist/mermaid.min.js
+
+markdown_extensions:
+  - abbr
+  - attr_list
+  - admonition
+  - callouts:
+      strip_period: no
+  - footnotes
+  - md_in_html
+  - pymdownx.blocks.tab:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      pygments_lang_class: true
+  - pymdownx.magiclink
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - toc:
+      permalink: "¤"
+
+plugins:
+  - search
+  - markdown-exec
+  - section-index
+  - macros:
+      module_name: _macros
+
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [../src]
+          inventories:
+            - https://docs.python.org/3/objects.inv
+            - https://pydantic.dev/docs/validation/latest/objects.inv
+          options:
+            backlinks: tree
+            docstring_options:
+              ignore_init_summary: true
+            docstring_section_style: list
+            filters: public
+            heading_level: 1
+            line_length: 88
+            merge_init_into_class: true
+            parameter_headings: true
+            type_parameter_headings: true
+            preload_modules: [mkdocstrings]
+            relative_crossrefs: true
+            scoped_crossrefs: true
+            separate_signature: true
+            show_bases: true
+            show_inheritance_diagram: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            show_signature_type_parameters: true
+            show_source: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            signature_crossrefs: true
+            summary: true
+            unwrap_annotated: true
+            extensions:
+              - griffe_fieldz

@@ -1,0 +1,63 @@
+name: Bug Report
+description: File a bug report
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Also tell us, what did you expect to happen? You can attach screenshots, if you have any.
+      placeholder: Tell us what you see!
+      value: "A bug happened!"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What version of our software are you running?
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: On which operating system did this happen?
+      description: If you tested on multiple operating systems, please select all that apply.
+      multiple: true
+      options:
+        - label: Windows
+        - label: macOS
+        - label: Linux
+        - label: Other
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Please copy and paste any relevant log output. This will be automatically formatted into code, so no need for backticks.
+      render: shell
+  - type: input
+    id: contact
+    attributes:
+      label: Contact Details
+      description: How can we get in touch with you if we need more info?
+      placeholder: ex. email@example.com
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Sanity Checks
+      description: Please check all that apply. If you haven't done these, please do them before submitting the issue.
+      options:
+        - label: I am running a version of the software that is still supported (not EOL).
+          required: true
+        - label: I searched for existing issues (open or closed) and did not find a duplicate.
+          required: true
+        - label: I made sure not to disclose any sensitive information in this issue description or in any attached logs / screenshots.
+          required: true

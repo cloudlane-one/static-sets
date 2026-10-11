@@ -1,0 +1,20 @@
+# Generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+SBOM.json
+*.ipynb
+.coverage
+/CHANGELOG.md
+
+# Secrets
+.env
+
+# Virtual environment folder
+/.venv
+
+# Local data folder
+/data
