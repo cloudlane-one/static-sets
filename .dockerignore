@@ -1,0 +1,16 @@
+.venv/
+.git/
+build/
+dist/
+wheels/
+*.egg-info/
+__pycache__/
+*.py[oc]
+.ipynb_checkpoints/
+.coverage
+SBOM.json
+.env
+data/
+.uv-cache/
+.cache/
+docs/img/*.png

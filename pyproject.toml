@@ -1,15 +1,33 @@
 [project]
-name = "based-pyproject"
-description = "Repository template for a modern Python development project."
+name = "static-sets"
+description = "Kubernetes operator for managing sets of static Pods, built on the based-operators framework."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13,<4"
-dependencies = ["structlog>=26.1.0,<27.0.0"]
+dependencies = [
+    "based-operators @ git+https://github.com/cloudlane-one/based-operators.git@main",
+    # kopf is imported directly by the operator entry point, so it is declared here
+    # rather than relied on as a transitive dependency of based-operators.
+    "kopf>=1.44.6,<2.0.0",
+    "pydantic>=2.11.0,<3.0.0",
+]
 dynamic = ["version"]
+
+[project.scripts]
+static-set-installer = "static_sets_installer.__main__:main"
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# based-operators is a direct Git reference until it ships a stable PyPI release.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+# The library lives in `/src`; the installer front end is its own top-level
+# package in `/app` so that `static-set-installer` ships in the wheel.
+packages = ["src/static_sets", "app/static_sets_installer"]
 
 [dependency-groups]
 # Everything needed in CI/CD pipelines, which includes all dev dependencies + release tooling.
@@ -57,7 +75,12 @@ app = [
     "rich>=15.0.0,<16.0.0",
 ]
 # Test runners and coverage tools.
-test = ["pytest>=9.0.3,<10.0.0", "pytest-cov>=7.1.0,<8.0.0"]
+test = [
+    "pytest>=9.0.3,<10.0.0",
+    "pytest-cov>=7.1.0,<8.0.0",
+    # The manifest tests parse the rendered chart and the samples themselves.
+    "pyyaml>=6.0.1,<7.0.0",
+]
 
 [tool.uv]
 add-bounds = "major"
@@ -88,6 +111,10 @@ max-complexity = 12
 "!src/**.py" = ["D"]
 
 [tool.pyright]
+# `src` holds the library and `app` holds the operator and installer entry points;
+# the entry point is a top-level module kopf loads by path, so pyright is told
+# where to find it.
+extraPaths = ["src", "app"]
 reportMatchNotExhaustive = true
 reportIncompatibleVariableOverride = true
 reportIncompatibleMethodOverride = true
@@ -97,7 +124,7 @@ reportOverlappingOverload = true
 line-length = 100
 
 [tool.deptry]
-known_first_party = ["based_pyproject"]
+known_first_party = ["static_sets", "static_sets_installer"]
 non_dev_dependency_groups = ["app"]
 
 [tool.deptry.per_rule_ignores]
@@ -105,7 +132,7 @@ DEP002 = ["ipykernel", "jupyter", "jupytext", "rich"]
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
-pythonpath = ["src"]
+pythonpath = ["src", "app"]
 
 [tool.coverage.run]
 source_dirs = ["src", "app"]
