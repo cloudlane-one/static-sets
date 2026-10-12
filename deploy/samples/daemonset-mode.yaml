@@ -1,0 +1,48 @@
+# A StaticSet in DaemonSet mode: one installer on every node the selector admits,
+# so every eligible node hosts the workload.
+#
+# DaemonSet mode takes no replica count: the DaemonSet controller decides how many
+# installers exist, and the operator computes the eligible nodes only to report
+# whether every one of them has acknowledged its installation.
+apiVersion: staticsets.cloudlane.dev/v1
+kind: StaticSet
+metadata:
+  name: node-agent
+  namespace: static-sets
+spec:
+  mode: DaemonSet
+
+  placement:
+    nodeSelector:
+      staticsets.cloudlane.dev/eligible: "true"
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+  template:
+    metadata:
+      labels:
+        app: node-agent
+    spec:
+      hostNetwork: true
+      containers:
+        - name: agent
+          image: registry.example.com/node-agent:2.4
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            # A privileged static Pod is refused unless spec.policy.allowPrivileged
+            # is set: kubelet starts it straight from a file, so nothing else gets
+            # a chance to review it.
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+
+  policy:
+    # The default, stated explicitly: a privileged static Pod is refused.
+    allowPrivileged: false
+
+  installer:
+    image: ghcr.io/cloudlane-one/static-sets:0.1.0

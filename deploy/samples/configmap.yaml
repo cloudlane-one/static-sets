@@ -1,0 +1,16 @@
+# The configuration the sample StaticSets reference.
+#
+# Every key becomes a file when the ConfigMap is mounted, and a literal environment
+# value when it is read with configMapKeyRef or envFrom. ConfigMap data is not
+# confidential, so inlining it is safe; Secret data is handled differently.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-conf
+  namespace: static-sets
+data:
+  app.conf: |
+    greeting=hello
+    listen=0.0.0.0:8080
+  flags.conf: |
+    verbose=false

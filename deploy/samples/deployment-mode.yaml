@@ -1,0 +1,78 @@
+# A StaticSet in Deployment mode: two installer Pods, wherever the scheduler puts
+# them, each turning its own node into a host of the workload.
+#
+# Apply the referenced configuration first (see configmap.yaml).
+apiVersion: staticsets.cloudlane.dev/v1
+kind: StaticSet
+metadata:
+  name: web
+  namespace: static-sets
+spec:
+  mode: Deployment
+  replicas: 2
+
+  # Placement steers the *scheduler*, which places the installer Pods. It is not
+  # copied onto the emitted static workload, because kubelet never schedules a
+  # static Pod: it starts the file it finds, on the node whose kubelet finds it.
+  placement:
+    nodeSelector:
+      kubernetes.io/os: linux
+    tolerations:
+      - key: node-role.kubernetes.io/edge
+        operator: Exists
+        effect: NoSchedule
+
+  # The workload template. Only the supported subset is accepted; anything that
+  # would need the API server or the scheduler is refused rather than dropped.
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: registry.example.com/web:1.27
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/web/app.conf"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: GREETING
+              valueFrom:
+                configMapKeyRef:
+                  name: web-conf
+                  key: app.conf
+          envFrom:
+            - configMapRef:
+                name: web-conf
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/web
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: conf
+          configMap:
+            name: web-conf
+
+  update:
+    # Recreate is the conservative default: the old placement is retired before a
+    # new one is installed, so a node never holds two revisions of the same
+    # StaticSet at once.
+    strategy: Recreate
+
+  offline:
+    retainedRevisions: 2
+
+  installer:
+    image: ghcr.io/cloudlane-one/static-sets:0.1.0
+    imagePullPolicy: IfNotPresent

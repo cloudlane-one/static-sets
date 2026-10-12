@@ -1,0 +1,2496 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: staticsets.staticsets.cloudlane.dev
+spec:
+  group: staticsets.cloudlane.dev
+  scope: Namespaced
+  names:
+    plural: staticsets
+    kind: StaticSet
+    listKind: StaticSetList
+    singular: staticset
+    shortNames:
+    - sset
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        description: A namespaced set of static Pods, managed through installer Pods.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: What a user asks for.
+            properties:
+              mode:
+                description: How many installers the operator creates, and where they
+                  land.
+                enum:
+                - Deployment
+                - DaemonSet
+                title: Mode
+                type: string
+              replicas:
+                title: Replicas
+                maximum: 64
+                minimum: 0
+                type: integer
+                nullable: true
+              template:
+                description: A ``PodTemplateSpec`` restricted to the supported subset.
+                properties:
+                  metadata:
+                    description: The subset of Pod metadata the operator carries onto
+                      the static Pod.
+                    properties:
+                      labels:
+                        title: Labels
+                        additionalProperties:
+                          type: string
+                        type: object
+                        nullable: true
+                      annotations:
+                        title: Annotations
+                        additionalProperties:
+                          type: string
+                        type: object
+                        nullable: true
+                    title: TemplateMeta
+                    type: object
+                    nullable: true
+                  spec:
+                    description: The workload Pod specification this operator can
+                      compile.
+                    properties:
+                      containers:
+                        items:
+                          description: A container from the supported subset of the
+                            workload API.
+                          properties:
+                            name:
+                              minLength: 1
+                              title: Name
+                              type: string
+                            image:
+                              minLength: 1
+                              title: Image
+                              type: string
+                            imagePullPolicy:
+                              description: 'Supported ``imagePullPolicy`` values.
+
+
+                                ``Never`` is the only policy that is safe on a disconnected
+                                host, because it
+
+                                never contacts a registry. ``IfNotPresent`` is the
+                                default and is safe as long
+
+                                as the image is already present.'
+                              enum:
+                              - Always
+                              - IfNotPresent
+                              - Never
+                              title: PullPolicy
+                              type: string
+                              nullable: true
+                            command:
+                              title: Command
+                              items:
+                                type: string
+                              type: array
+                              nullable: true
+                            args:
+                              title: Args
+                              items:
+                                type: string
+                              type: array
+                              nullable: true
+                            workingDir:
+                              title: Workingdir
+                              type: string
+                              nullable: true
+                            env:
+                              title: Env
+                              items:
+                                description: 'A container environment variable.
+
+
+                                  The name is constrained to the C identifier form
+                                  Kubernetes requires, so an
+
+                                  unusable name is refused here rather than producing
+                                  a manifest kubelet rejects.'
+                                properties:
+                                  name:
+                                    minLength: 1
+                                    pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                    title: Name
+                                    type: string
+                                  value:
+                                    title: Value
+                                    type: string
+                                    nullable: true
+                                  valueFrom:
+                                    description: 'Sources a single environment variable.
+
+
+                                      Only ``configMapKeyRef`` and ``secretKeyRef``
+                                      are supported; ``fieldRef`` and
+
+                                      ``resourceFieldRef`` are rejected by the unknown-field
+                                      rule.'
+                                    properties:
+                                      configMapKeyRef:
+                                        description: A reference to one key of a ConfigMap,
+                                          used to fill an environment variable.
+                                        properties:
+                                          name:
+                                            minLength: 1
+                                            title: Name
+                                            type: string
+                                          key:
+                                            minLength: 1
+                                            title: Key
+                                            type: string
+                                          optional:
+                                            default: false
+                                            title: Optional
+                                            type: boolean
+                                        required: &id005
+                                        - name
+                                        - key
+                                        title: ConfigMapKeySelector
+                                        type: object
+                                        nullable: true
+                                      secretKeyRef:
+                                        description: A reference to one key of a Secret,
+                                          used to fill an environment variable.
+                                        properties:
+                                          name:
+                                            minLength: 1
+                                            title: Name
+                                            type: string
+                                          key:
+                                            minLength: 1
+                                            title: Key
+                                            type: string
+                                          optional:
+                                            default: false
+                                            title: Optional
+                                            type: boolean
+                                        required: &id006
+                                        - name
+                                        - key
+                                        title: SecretKeySelector
+                                        type: object
+                                        nullable: true
+                                    title: EnvVarSource
+                                    type: object
+                                    nullable: true
+                                required: &id007
+                                - name
+                                title: EnvVar
+                                type: object
+                              type: array
+                              nullable: true
+                            envFrom:
+                              title: Envfrom
+                              items:
+                                description: A bulk environment source, with an optional
+                                  prefix.
+                                properties:
+                                  prefix:
+                                    title: Prefix
+                                    type: string
+                                    nullable: true
+                                  configMapRef:
+                                    description: A whole-ConfigMap environment source,
+                                      as ``envFrom`` uses it.
+                                    properties:
+                                      name:
+                                        minLength: 1
+                                        title: Name
+                                        type: string
+                                      optional:
+                                        default: false
+                                        title: Optional
+                                        type: boolean
+                                    required: &id008
+                                    - name
+                                    title: ConfigMapEnvSource
+                                    type: object
+                                    nullable: true
+                                  secretRef:
+                                    description: A whole-Secret environment source,
+                                      as ``envFrom`` uses it.
+                                    properties:
+                                      name:
+                                        minLength: 1
+                                        title: Name
+                                        type: string
+                                      optional:
+                                        default: false
+                                        title: Optional
+                                        type: boolean
+                                    required: &id009
+                                    - name
+                                    title: SecretEnvSource
+                                    type: object
+                                    nullable: true
+                                title: EnvFromSource
+                                type: object
+                              type: array
+                              nullable: true
+                            ports:
+                              title: Ports
+                              items:
+                                description: A port a container listens on.
+                                properties:
+                                  containerPort:
+                                    maximum: 65535
+                                    minimum: 1
+                                    title: Containerport
+                                    type: integer
+                                  hostPort:
+                                    title: Hostport
+                                    type: integer
+                                    nullable: true
+                                  hostIP:
+                                    title: Hostip
+                                    type: string
+                                    nullable: true
+                                  name:
+                                    title: Name
+                                    type: string
+                                    nullable: true
+                                  protocol:
+                                    default: TCP
+                                    enum:
+                                    - TCP
+                                    - UDP
+                                    - SCTP
+                                    title: Protocol
+                                    type: string
+                                required: &id010
+                                - containerPort
+                                title: ContainerPort
+                                type: object
+                              type: array
+                              nullable: true
+                            resources:
+                              description: Container resource requests and limits,
+                                passed through unchanged.
+                              properties:
+                                limits:
+                                  title: Limits
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                  nullable: true
+                                requests:
+                                  title: Requests
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                  nullable: true
+                              title: ResourceRequirements
+                              type: object
+                              nullable: true
+                            volumeMounts:
+                              title: Volumemounts
+                              items:
+                                description: A container's mount of one of the Pod's
+                                  volumes.
+                                properties:
+                                  name:
+                                    minLength: 1
+                                    title: Name
+                                    type: string
+                                  mountPath:
+                                    minLength: 1
+                                    title: Mountpath
+                                    type: string
+                                  readOnly:
+                                    default: false
+                                    title: Readonly
+                                    type: boolean
+                                  subPath:
+                                    title: Subpath
+                                    type: string
+                                    nullable: true
+                                  subPathExpr:
+                                    title: Subpathexpr
+                                    type: string
+                                    nullable: true
+                                  mountPropagation:
+                                    title: Mountpropagation
+                                    type: string
+                                    nullable: true
+                                  recursiveReadOnly:
+                                    title: Recursivereadonly
+                                    type: string
+                                    nullable: true
+                                required: &id011
+                                - name
+                                - mountPath
+                                title: VolumeMount
+                                type: object
+                              type: array
+                              nullable: true
+                            livenessProbe:
+                              description: A liveness, readiness or startup probe.
+                              properties:
+                                exec:
+                                  description: A command executed inside the container.
+                                  properties:
+                                    command:
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      title: Command
+                                      type: array
+                                  required: &id001
+                                  - command
+                                  title: ExecAction
+                                  type: object
+                                  nullable: true
+                                httpGet:
+                                  description: An HTTP GET performed against the container.
+                                  properties:
+                                    path:
+                                      title: Path
+                                      type: string
+                                      nullable: true
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                    scheme:
+                                      default: HTTP
+                                      enum:
+                                      - HTTP
+                                      - HTTPS
+                                      title: Scheme
+                                      type: string
+                                    httpHeaders:
+                                      title: Httpheaders
+                                      items:
+                                        additionalProperties:
+                                          type: string
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  required: &id002
+                                  - port
+                                  title: HTTPGetAction
+                                  type: object
+                                  nullable: true
+                                tcpSocket:
+                                  description: A TCP connection attempt against the
+                                    container.
+                                  properties:
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                  required: &id003
+                                  - port
+                                  title: TCPSocketAction
+                                  type: object
+                                  nullable: true
+                                grpc:
+                                  description: A gRPC health probe.
+                                  properties:
+                                    port:
+                                      maximum: 65535
+                                      minimum: 1
+                                      title: Port
+                                      type: integer
+                                    service:
+                                      title: Service
+                                      type: string
+                                      nullable: true
+                                  required: &id004
+                                  - port
+                                  title: GRPCAction
+                                  type: object
+                                  nullable: true
+                                initialDelaySeconds:
+                                  title: Initialdelayseconds
+                                  type: integer
+                                  nullable: true
+                                timeoutSeconds:
+                                  title: Timeoutseconds
+                                  type: integer
+                                  nullable: true
+                                periodSeconds:
+                                  title: Periodseconds
+                                  type: integer
+                                  nullable: true
+                                successThreshold:
+                                  title: Successthreshold
+                                  type: integer
+                                  nullable: true
+                                failureThreshold:
+                                  title: Failurethreshold
+                                  type: integer
+                                  nullable: true
+                                terminationGracePeriodSeconds:
+                                  title: Terminationgraceperiodseconds
+                                  type: integer
+                                  nullable: true
+                              title: Probe
+                              type: object
+                              nullable: true
+                            readinessProbe:
+                              description: A liveness, readiness or startup probe.
+                              properties:
+                                exec:
+                                  description: A command executed inside the container.
+                                  properties:
+                                    command:
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      title: Command
+                                      type: array
+                                  required: *id001
+                                  title: ExecAction
+                                  type: object
+                                  nullable: true
+                                httpGet:
+                                  description: An HTTP GET performed against the container.
+                                  properties:
+                                    path:
+                                      title: Path
+                                      type: string
+                                      nullable: true
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                    scheme:
+                                      default: HTTP
+                                      enum:
+                                      - HTTP
+                                      - HTTPS
+                                      title: Scheme
+                                      type: string
+                                    httpHeaders:
+                                      title: Httpheaders
+                                      items:
+                                        additionalProperties:
+                                          type: string
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  required: *id002
+                                  title: HTTPGetAction
+                                  type: object
+                                  nullable: true
+                                tcpSocket:
+                                  description: A TCP connection attempt against the
+                                    container.
+                                  properties:
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                  required: *id003
+                                  title: TCPSocketAction
+                                  type: object
+                                  nullable: true
+                                grpc:
+                                  description: A gRPC health probe.
+                                  properties:
+                                    port:
+                                      maximum: 65535
+                                      minimum: 1
+                                      title: Port
+                                      type: integer
+                                    service:
+                                      title: Service
+                                      type: string
+                                      nullable: true
+                                  required: *id004
+                                  title: GRPCAction
+                                  type: object
+                                  nullable: true
+                                initialDelaySeconds:
+                                  title: Initialdelayseconds
+                                  type: integer
+                                  nullable: true
+                                timeoutSeconds:
+                                  title: Timeoutseconds
+                                  type: integer
+                                  nullable: true
+                                periodSeconds:
+                                  title: Periodseconds
+                                  type: integer
+                                  nullable: true
+                                successThreshold:
+                                  title: Successthreshold
+                                  type: integer
+                                  nullable: true
+                                failureThreshold:
+                                  title: Failurethreshold
+                                  type: integer
+                                  nullable: true
+                                terminationGracePeriodSeconds:
+                                  title: Terminationgraceperiodseconds
+                                  type: integer
+                                  nullable: true
+                              title: Probe
+                              type: object
+                              nullable: true
+                            startupProbe:
+                              description: A liveness, readiness or startup probe.
+                              properties:
+                                exec:
+                                  description: A command executed inside the container.
+                                  properties:
+                                    command:
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      title: Command
+                                      type: array
+                                  required: *id001
+                                  title: ExecAction
+                                  type: object
+                                  nullable: true
+                                httpGet:
+                                  description: An HTTP GET performed against the container.
+                                  properties:
+                                    path:
+                                      title: Path
+                                      type: string
+                                      nullable: true
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                    scheme:
+                                      default: HTTP
+                                      enum:
+                                      - HTTP
+                                      - HTTPS
+                                      title: Scheme
+                                      type: string
+                                    httpHeaders:
+                                      title: Httpheaders
+                                      items:
+                                        additionalProperties:
+                                          type: string
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  required: *id002
+                                  title: HTTPGetAction
+                                  type: object
+                                  nullable: true
+                                tcpSocket:
+                                  description: A TCP connection attempt against the
+                                    container.
+                                  properties:
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                  required: *id003
+                                  title: TCPSocketAction
+                                  type: object
+                                  nullable: true
+                                grpc:
+                                  description: A gRPC health probe.
+                                  properties:
+                                    port:
+                                      maximum: 65535
+                                      minimum: 1
+                                      title: Port
+                                      type: integer
+                                    service:
+                                      title: Service
+                                      type: string
+                                      nullable: true
+                                  required: *id004
+                                  title: GRPCAction
+                                  type: object
+                                  nullable: true
+                                initialDelaySeconds:
+                                  title: Initialdelayseconds
+                                  type: integer
+                                  nullable: true
+                                timeoutSeconds:
+                                  title: Timeoutseconds
+                                  type: integer
+                                  nullable: true
+                                periodSeconds:
+                                  title: Periodseconds
+                                  type: integer
+                                  nullable: true
+                                successThreshold:
+                                  title: Successthreshold
+                                  type: integer
+                                  nullable: true
+                                failureThreshold:
+                                  title: Failurethreshold
+                                  type: integer
+                                  nullable: true
+                                terminationGracePeriodSeconds:
+                                  title: Terminationgraceperiodseconds
+                                  type: integer
+                                  nullable: true
+                              title: Probe
+                              type: object
+                              nullable: true
+                            securityContext:
+                              description: Container-level security settings, preserved
+                                for the static workload.
+                              properties:
+                                privileged:
+                                  title: Privileged
+                                  type: boolean
+                                  nullable: true
+                                allowPrivilegeEscalation:
+                                  title: Allowprivilegeescalation
+                                  type: boolean
+                                  nullable: true
+                                readOnlyRootFilesystem:
+                                  title: Readonlyrootfilesystem
+                                  type: boolean
+                                  nullable: true
+                                runAsUser:
+                                  title: Runasuser
+                                  type: integer
+                                  nullable: true
+                                runAsGroup:
+                                  title: Runasgroup
+                                  type: integer
+                                  nullable: true
+                                runAsNonRoot:
+                                  title: Runasnonroot
+                                  type: boolean
+                                  nullable: true
+                                capabilities:
+                                  description: Linux capabilities to add or drop.
+                                  properties:
+                                    add:
+                                      title: Add
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                    drop:
+                                      title: Drop
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                  title: Capabilities
+                                  type: object
+                                  nullable: true
+                                seccompProfile:
+                                  description: A ``seccompProfile`` hint, passed through
+                                    unchanged.
+                                  properties:
+                                    type:
+                                      enum:
+                                      - RuntimeDefault
+                                      - Unconfined
+                                      - Localhost
+                                      title: Type
+                                      type: string
+                                    localhostProfile:
+                                      title: Localhostprofile
+                                      type: string
+                                      nullable: true
+                                  required: &id012
+                                  - type
+                                  title: SeccompProfile
+                                  type: object
+                                  nullable: true
+                              title: ContainerSecurityContext
+                              type: object
+                              nullable: true
+                            stdin:
+                              title: Stdin
+                              type: boolean
+                              nullable: true
+                            stdinOnce:
+                              title: Stdinonce
+                              type: boolean
+                              nullable: true
+                            tty:
+                              title: Tty
+                              type: boolean
+                              nullable: true
+                          required: &id013
+                          - name
+                          - image
+                          title: Container
+                          type: object
+                        minItems: 1
+                        title: Containers
+                        type: array
+                      initContainers:
+                        title: Initcontainers
+                        items:
+                          description: A container from the supported subset of the
+                            workload API.
+                          properties:
+                            name:
+                              minLength: 1
+                              title: Name
+                              type: string
+                            image:
+                              minLength: 1
+                              title: Image
+                              type: string
+                            imagePullPolicy:
+                              description: 'Supported ``imagePullPolicy`` values.
+
+
+                                ``Never`` is the only policy that is safe on a disconnected
+                                host, because it
+
+                                never contacts a registry. ``IfNotPresent`` is the
+                                default and is safe as long
+
+                                as the image is already present.'
+                              enum:
+                              - Always
+                              - IfNotPresent
+                              - Never
+                              title: PullPolicy
+                              type: string
+                              nullable: true
+                            command:
+                              title: Command
+                              items:
+                                type: string
+                              type: array
+                              nullable: true
+                            args:
+                              title: Args
+                              items:
+                                type: string
+                              type: array
+                              nullable: true
+                            workingDir:
+                              title: Workingdir
+                              type: string
+                              nullable: true
+                            env:
+                              title: Env
+                              items:
+                                description: 'A container environment variable.
+
+
+                                  The name is constrained to the C identifier form
+                                  Kubernetes requires, so an
+
+                                  unusable name is refused here rather than producing
+                                  a manifest kubelet rejects.'
+                                properties:
+                                  name:
+                                    minLength: 1
+                                    pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                    title: Name
+                                    type: string
+                                  value:
+                                    title: Value
+                                    type: string
+                                    nullable: true
+                                  valueFrom:
+                                    description: 'Sources a single environment variable.
+
+
+                                      Only ``configMapKeyRef`` and ``secretKeyRef``
+                                      are supported; ``fieldRef`` and
+
+                                      ``resourceFieldRef`` are rejected by the unknown-field
+                                      rule.'
+                                    properties:
+                                      configMapKeyRef:
+                                        description: A reference to one key of a ConfigMap,
+                                          used to fill an environment variable.
+                                        properties:
+                                          name:
+                                            minLength: 1
+                                            title: Name
+                                            type: string
+                                          key:
+                                            minLength: 1
+                                            title: Key
+                                            type: string
+                                          optional:
+                                            default: false
+                                            title: Optional
+                                            type: boolean
+                                        required: *id005
+                                        title: ConfigMapKeySelector
+                                        type: object
+                                        nullable: true
+                                      secretKeyRef:
+                                        description: A reference to one key of a Secret,
+                                          used to fill an environment variable.
+                                        properties:
+                                          name:
+                                            minLength: 1
+                                            title: Name
+                                            type: string
+                                          key:
+                                            minLength: 1
+                                            title: Key
+                                            type: string
+                                          optional:
+                                            default: false
+                                            title: Optional
+                                            type: boolean
+                                        required: *id006
+                                        title: SecretKeySelector
+                                        type: object
+                                        nullable: true
+                                    title: EnvVarSource
+                                    type: object
+                                    nullable: true
+                                required: *id007
+                                title: EnvVar
+                                type: object
+                              type: array
+                              nullable: true
+                            envFrom:
+                              title: Envfrom
+                              items:
+                                description: A bulk environment source, with an optional
+                                  prefix.
+                                properties:
+                                  prefix:
+                                    title: Prefix
+                                    type: string
+                                    nullable: true
+                                  configMapRef:
+                                    description: A whole-ConfigMap environment source,
+                                      as ``envFrom`` uses it.
+                                    properties:
+                                      name:
+                                        minLength: 1
+                                        title: Name
+                                        type: string
+                                      optional:
+                                        default: false
+                                        title: Optional
+                                        type: boolean
+                                    required: *id008
+                                    title: ConfigMapEnvSource
+                                    type: object
+                                    nullable: true
+                                  secretRef:
+                                    description: A whole-Secret environment source,
+                                      as ``envFrom`` uses it.
+                                    properties:
+                                      name:
+                                        minLength: 1
+                                        title: Name
+                                        type: string
+                                      optional:
+                                        default: false
+                                        title: Optional
+                                        type: boolean
+                                    required: *id009
+                                    title: SecretEnvSource
+                                    type: object
+                                    nullable: true
+                                title: EnvFromSource
+                                type: object
+                              type: array
+                              nullable: true
+                            ports:
+                              title: Ports
+                              items:
+                                description: A port a container listens on.
+                                properties:
+                                  containerPort:
+                                    maximum: 65535
+                                    minimum: 1
+                                    title: Containerport
+                                    type: integer
+                                  hostPort:
+                                    title: Hostport
+                                    type: integer
+                                    nullable: true
+                                  hostIP:
+                                    title: Hostip
+                                    type: string
+                                    nullable: true
+                                  name:
+                                    title: Name
+                                    type: string
+                                    nullable: true
+                                  protocol:
+                                    default: TCP
+                                    enum:
+                                    - TCP
+                                    - UDP
+                                    - SCTP
+                                    title: Protocol
+                                    type: string
+                                required: *id010
+                                title: ContainerPort
+                                type: object
+                              type: array
+                              nullable: true
+                            resources:
+                              description: Container resource requests and limits,
+                                passed through unchanged.
+                              properties:
+                                limits:
+                                  title: Limits
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                  nullable: true
+                                requests:
+                                  title: Requests
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                  nullable: true
+                              title: ResourceRequirements
+                              type: object
+                              nullable: true
+                            volumeMounts:
+                              title: Volumemounts
+                              items:
+                                description: A container's mount of one of the Pod's
+                                  volumes.
+                                properties:
+                                  name:
+                                    minLength: 1
+                                    title: Name
+                                    type: string
+                                  mountPath:
+                                    minLength: 1
+                                    title: Mountpath
+                                    type: string
+                                  readOnly:
+                                    default: false
+                                    title: Readonly
+                                    type: boolean
+                                  subPath:
+                                    title: Subpath
+                                    type: string
+                                    nullable: true
+                                  subPathExpr:
+                                    title: Subpathexpr
+                                    type: string
+                                    nullable: true
+                                  mountPropagation:
+                                    title: Mountpropagation
+                                    type: string
+                                    nullable: true
+                                  recursiveReadOnly:
+                                    title: Recursivereadonly
+                                    type: string
+                                    nullable: true
+                                required: *id011
+                                title: VolumeMount
+                                type: object
+                              type: array
+                              nullable: true
+                            livenessProbe:
+                              description: A liveness, readiness or startup probe.
+                              properties:
+                                exec:
+                                  description: A command executed inside the container.
+                                  properties:
+                                    command:
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      title: Command
+                                      type: array
+                                  required: *id001
+                                  title: ExecAction
+                                  type: object
+                                  nullable: true
+                                httpGet:
+                                  description: An HTTP GET performed against the container.
+                                  properties:
+                                    path:
+                                      title: Path
+                                      type: string
+                                      nullable: true
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                    scheme:
+                                      default: HTTP
+                                      enum:
+                                      - HTTP
+                                      - HTTPS
+                                      title: Scheme
+                                      type: string
+                                    httpHeaders:
+                                      title: Httpheaders
+                                      items:
+                                        additionalProperties:
+                                          type: string
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  required: *id002
+                                  title: HTTPGetAction
+                                  type: object
+                                  nullable: true
+                                tcpSocket:
+                                  description: A TCP connection attempt against the
+                                    container.
+                                  properties:
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                  required: *id003
+                                  title: TCPSocketAction
+                                  type: object
+                                  nullable: true
+                                grpc:
+                                  description: A gRPC health probe.
+                                  properties:
+                                    port:
+                                      maximum: 65535
+                                      minimum: 1
+                                      title: Port
+                                      type: integer
+                                    service:
+                                      title: Service
+                                      type: string
+                                      nullable: true
+                                  required: *id004
+                                  title: GRPCAction
+                                  type: object
+                                  nullable: true
+                                initialDelaySeconds:
+                                  title: Initialdelayseconds
+                                  type: integer
+                                  nullable: true
+                                timeoutSeconds:
+                                  title: Timeoutseconds
+                                  type: integer
+                                  nullable: true
+                                periodSeconds:
+                                  title: Periodseconds
+                                  type: integer
+                                  nullable: true
+                                successThreshold:
+                                  title: Successthreshold
+                                  type: integer
+                                  nullable: true
+                                failureThreshold:
+                                  title: Failurethreshold
+                                  type: integer
+                                  nullable: true
+                                terminationGracePeriodSeconds:
+                                  title: Terminationgraceperiodseconds
+                                  type: integer
+                                  nullable: true
+                              title: Probe
+                              type: object
+                              nullable: true
+                            readinessProbe:
+                              description: A liveness, readiness or startup probe.
+                              properties:
+                                exec:
+                                  description: A command executed inside the container.
+                                  properties:
+                                    command:
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      title: Command
+                                      type: array
+                                  required: *id001
+                                  title: ExecAction
+                                  type: object
+                                  nullable: true
+                                httpGet:
+                                  description: An HTTP GET performed against the container.
+                                  properties:
+                                    path:
+                                      title: Path
+                                      type: string
+                                      nullable: true
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                    scheme:
+                                      default: HTTP
+                                      enum:
+                                      - HTTP
+                                      - HTTPS
+                                      title: Scheme
+                                      type: string
+                                    httpHeaders:
+                                      title: Httpheaders
+                                      items:
+                                        additionalProperties:
+                                          type: string
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  required: *id002
+                                  title: HTTPGetAction
+                                  type: object
+                                  nullable: true
+                                tcpSocket:
+                                  description: A TCP connection attempt against the
+                                    container.
+                                  properties:
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                  required: *id003
+                                  title: TCPSocketAction
+                                  type: object
+                                  nullable: true
+                                grpc:
+                                  description: A gRPC health probe.
+                                  properties:
+                                    port:
+                                      maximum: 65535
+                                      minimum: 1
+                                      title: Port
+                                      type: integer
+                                    service:
+                                      title: Service
+                                      type: string
+                                      nullable: true
+                                  required: *id004
+                                  title: GRPCAction
+                                  type: object
+                                  nullable: true
+                                initialDelaySeconds:
+                                  title: Initialdelayseconds
+                                  type: integer
+                                  nullable: true
+                                timeoutSeconds:
+                                  title: Timeoutseconds
+                                  type: integer
+                                  nullable: true
+                                periodSeconds:
+                                  title: Periodseconds
+                                  type: integer
+                                  nullable: true
+                                successThreshold:
+                                  title: Successthreshold
+                                  type: integer
+                                  nullable: true
+                                failureThreshold:
+                                  title: Failurethreshold
+                                  type: integer
+                                  nullable: true
+                                terminationGracePeriodSeconds:
+                                  title: Terminationgraceperiodseconds
+                                  type: integer
+                                  nullable: true
+                              title: Probe
+                              type: object
+                              nullable: true
+                            startupProbe:
+                              description: A liveness, readiness or startup probe.
+                              properties:
+                                exec:
+                                  description: A command executed inside the container.
+                                  properties:
+                                    command:
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      title: Command
+                                      type: array
+                                  required: *id001
+                                  title: ExecAction
+                                  type: object
+                                  nullable: true
+                                httpGet:
+                                  description: An HTTP GET performed against the container.
+                                  properties:
+                                    path:
+                                      title: Path
+                                      type: string
+                                      nullable: true
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                    scheme:
+                                      default: HTTP
+                                      enum:
+                                      - HTTP
+                                      - HTTPS
+                                      title: Scheme
+                                      type: string
+                                    httpHeaders:
+                                      title: Httpheaders
+                                      items:
+                                        additionalProperties:
+                                          type: string
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  required: *id002
+                                  title: HTTPGetAction
+                                  type: object
+                                  nullable: true
+                                tcpSocket:
+                                  description: A TCP connection attempt against the
+                                    container.
+                                  properties:
+                                    port:
+                                      title: Port
+                                      x-kubernetes-int-or-string: true
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                    host:
+                                      title: Host
+                                      type: string
+                                      nullable: true
+                                  required: *id003
+                                  title: TCPSocketAction
+                                  type: object
+                                  nullable: true
+                                grpc:
+                                  description: A gRPC health probe.
+                                  properties:
+                                    port:
+                                      maximum: 65535
+                                      minimum: 1
+                                      title: Port
+                                      type: integer
+                                    service:
+                                      title: Service
+                                      type: string
+                                      nullable: true
+                                  required: *id004
+                                  title: GRPCAction
+                                  type: object
+                                  nullable: true
+                                initialDelaySeconds:
+                                  title: Initialdelayseconds
+                                  type: integer
+                                  nullable: true
+                                timeoutSeconds:
+                                  title: Timeoutseconds
+                                  type: integer
+                                  nullable: true
+                                periodSeconds:
+                                  title: Periodseconds
+                                  type: integer
+                                  nullable: true
+                                successThreshold:
+                                  title: Successthreshold
+                                  type: integer
+                                  nullable: true
+                                failureThreshold:
+                                  title: Failurethreshold
+                                  type: integer
+                                  nullable: true
+                                terminationGracePeriodSeconds:
+                                  title: Terminationgraceperiodseconds
+                                  type: integer
+                                  nullable: true
+                              title: Probe
+                              type: object
+                              nullable: true
+                            securityContext:
+                              description: Container-level security settings, preserved
+                                for the static workload.
+                              properties:
+                                privileged:
+                                  title: Privileged
+                                  type: boolean
+                                  nullable: true
+                                allowPrivilegeEscalation:
+                                  title: Allowprivilegeescalation
+                                  type: boolean
+                                  nullable: true
+                                readOnlyRootFilesystem:
+                                  title: Readonlyrootfilesystem
+                                  type: boolean
+                                  nullable: true
+                                runAsUser:
+                                  title: Runasuser
+                                  type: integer
+                                  nullable: true
+                                runAsGroup:
+                                  title: Runasgroup
+                                  type: integer
+                                  nullable: true
+                                runAsNonRoot:
+                                  title: Runasnonroot
+                                  type: boolean
+                                  nullable: true
+                                capabilities:
+                                  description: Linux capabilities to add or drop.
+                                  properties:
+                                    add:
+                                      title: Add
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                    drop:
+                                      title: Drop
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                  title: Capabilities
+                                  type: object
+                                  nullable: true
+                                seccompProfile:
+                                  description: A ``seccompProfile`` hint, passed through
+                                    unchanged.
+                                  properties:
+                                    type:
+                                      enum:
+                                      - RuntimeDefault
+                                      - Unconfined
+                                      - Localhost
+                                      title: Type
+                                      type: string
+                                    localhostProfile:
+                                      title: Localhostprofile
+                                      type: string
+                                      nullable: true
+                                  required: *id012
+                                  title: SeccompProfile
+                                  type: object
+                                  nullable: true
+                              title: ContainerSecurityContext
+                              type: object
+                              nullable: true
+                            stdin:
+                              title: Stdin
+                              type: boolean
+                              nullable: true
+                            stdinOnce:
+                              title: Stdinonce
+                              type: boolean
+                              nullable: true
+                            tty:
+                              title: Tty
+                              type: boolean
+                              nullable: true
+                          required: *id013
+                          title: Container
+                          type: object
+                        type: array
+                        nullable: true
+                      volumes:
+                        title: Volumes
+                        items:
+                          description: A Pod volume from the supported subset.
+                          properties:
+                            name:
+                              minLength: 1
+                              title: Name
+                              type: string
+                            configMap:
+                              description: A ConfigMap mounted as files, materialized
+                                into the static bundle.
+                              properties:
+                                name:
+                                  minLength: 1
+                                  title: Name
+                                  type: string
+                                items:
+                                  title: Items
+                                  items:
+                                    description: Maps one key of a ConfigMap or Secret
+                                      to a file name.
+                                    properties:
+                                      key:
+                                        minLength: 1
+                                        title: Key
+                                        type: string
+                                      path:
+                                        minLength: 1
+                                        title: Path
+                                        type: string
+                                      mode:
+                                        title: Mode
+                                        type: integer
+                                        nullable: true
+                                    required: &id014
+                                    - key
+                                    - path
+                                    title: KeyToPath
+                                    type: object
+                                  type: array
+                                  nullable: true
+                                defaultMode:
+                                  title: Defaultmode
+                                  type: integer
+                                  nullable: true
+                                optional:
+                                  default: false
+                                  title: Optional
+                                  type: boolean
+                              required:
+                              - name
+                              title: ConfigMapVolumeSource
+                              type: object
+                              nullable: true
+                            secret:
+                              description: A Secret mounted as files, materialized
+                                with restrictive permissions.
+                              properties:
+                                secretName:
+                                  minLength: 1
+                                  title: Secretname
+                                  type: string
+                                items:
+                                  title: Items
+                                  items:
+                                    description: Maps one key of a ConfigMap or Secret
+                                      to a file name.
+                                    properties:
+                                      key:
+                                        minLength: 1
+                                        title: Key
+                                        type: string
+                                      path:
+                                        minLength: 1
+                                        title: Path
+                                        type: string
+                                      mode:
+                                        title: Mode
+                                        type: integer
+                                        nullable: true
+                                    required: *id014
+                                    title: KeyToPath
+                                    type: object
+                                  type: array
+                                  nullable: true
+                                defaultMode:
+                                  title: Defaultmode
+                                  type: integer
+                                  nullable: true
+                                optional:
+                                  default: false
+                                  title: Optional
+                                  type: boolean
+                              required:
+                              - secretName
+                              title: SecretVolumeSource
+                              type: object
+                              nullable: true
+                            emptyDir:
+                              description: An ``emptyDir`` volume, which kubelet provides
+                                without the API server.
+                              properties:
+                                medium:
+                                  default: ''
+                                  enum:
+                                  - ''
+                                  - Memory
+                                  title: Medium
+                                  type: string
+                                sizeLimit:
+                                  title: Sizelimit
+                                  type: string
+                                  nullable: true
+                              title: EmptyDirVolumeSource
+                              type: object
+                              nullable: true
+                            hostPath:
+                              title: Hostpath
+                              additionalProperties: true
+                              type: object
+                              nullable: true
+                            persistentVolumeClaim:
+                              title: Persistentvolumeclaim
+                              additionalProperties: true
+                              type: object
+                              nullable: true
+                            projected:
+                              title: Projected
+                              additionalProperties: true
+                              type: object
+                              nullable: true
+                            downwardApi:
+                              title: Downwardapi
+                              additionalProperties: true
+                              type: object
+                              nullable: true
+                          required:
+                          - name
+                          title: Volume
+                          type: object
+                        type: array
+                        nullable: true
+                      restartPolicy:
+                        enum:
+                        - Always
+                        default: Always
+                        title: Restartpolicy
+                        type: string
+                      terminationGracePeriodSeconds:
+                        title: Terminationgraceperiodseconds
+                        type: integer
+                        nullable: true
+                      dnsPolicy:
+                        title: Dnspolicy
+                        enum:
+                        - ClusterFirstWithHostNet
+                        - ClusterFirst
+                        - Default
+                        - None
+                        type: string
+                        nullable: true
+                      dnsConfig:
+                        description: Pod DNS settings that kubelet can apply without
+                          the API server.
+                        properties:
+                          nameservers:
+                            title: Nameservers
+                            items:
+                              type: string
+                            type: array
+                            nullable: true
+                          searches:
+                            title: Searches
+                            items:
+                              type: string
+                            type: array
+                            nullable: true
+                          options:
+                            title: Options
+                            items:
+                              additionalProperties: true
+                              type: object
+                            type: array
+                            nullable: true
+                        title: DnsConfig
+                        type: object
+                        nullable: true
+                      hostNetwork:
+                        title: Hostnetwork
+                        type: boolean
+                        nullable: true
+                      hostPid:
+                        title: Hostpid
+                        type: boolean
+                        nullable: true
+                      hostIpc:
+                        title: Hostipc
+                        type: boolean
+                        nullable: true
+                      hostname:
+                        title: Hostname
+                        type: string
+                        nullable: true
+                      hostAliases:
+                        title: Hostaliases
+                        items:
+                          description: An entry appended to the container's ``/etc/hosts``.
+                          properties:
+                            ip:
+                              title: Ip
+                              type: string
+                            hostnames:
+                              items:
+                                type: string
+                              minItems: 1
+                              title: Hostnames
+                              type: array
+                          required:
+                          - ip
+                          - hostnames
+                          title: HostAlias
+                          type: object
+                        type: array
+                        nullable: true
+                      shareProcessNamespace:
+                        title: Shareprocessnamespace
+                        type: boolean
+                        nullable: true
+                      securityContext:
+                        description: Pod-level security settings, preserved for the
+                          static workload.
+                        properties:
+                          runAsUser:
+                            title: Runasuser
+                            type: integer
+                            nullable: true
+                          runAsGroup:
+                            title: Runasgroup
+                            type: integer
+                            nullable: true
+                          runAsNonRoot:
+                            title: Runasnonroot
+                            type: boolean
+                            nullable: true
+                          fsGroup:
+                            title: Fsgroup
+                            type: integer
+                            nullable: true
+                          supplementalGroups:
+                            title: Supplementalgroups
+                            items:
+                              type: integer
+                            type: array
+                            nullable: true
+                          seccompProfile:
+                            description: A ``seccompProfile`` hint, passed through
+                              unchanged.
+                            properties:
+                              type:
+                                enum:
+                                - RuntimeDefault
+                                - Unconfined
+                                - Localhost
+                                title: Type
+                                type: string
+                              localhostProfile:
+                                title: Localhostprofile
+                                type: string
+                                nullable: true
+                            required: *id012
+                            title: SeccompProfile
+                            type: object
+                            nullable: true
+                          sysctls:
+                            title: Sysctls
+                            items:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            type: array
+                            nullable: true
+                        title: PodSecurityContext
+                        type: object
+                        nullable: true
+                      nodeSelector:
+                        title: Nodeselector
+                        additionalProperties:
+                          type: string
+                        type: object
+                        nullable: true
+                      affinity:
+                        title: Affinity
+                        additionalProperties: true
+                        type: object
+                        nullable: true
+                      tolerations:
+                        title: Tolerations
+                        items:
+                          additionalProperties: true
+                          type: object
+                        type: array
+                        nullable: true
+                      topologySpreadConstraints:
+                        title: Topologyspreadconstraints
+                        items:
+                          additionalProperties: true
+                          type: object
+                        type: array
+                        nullable: true
+                      serviceAccountName:
+                        title: Serviceaccountname
+                        type: string
+                        nullable: true
+                      automountServiceAccountToken:
+                        title: Automountserviceaccounttoken
+                        type: boolean
+                        nullable: true
+                      imagePullSecrets:
+                        title: Imagepullsecrets
+                        items:
+                          additionalProperties: true
+                          type: object
+                        type: array
+                        nullable: true
+                      schedulerName:
+                        title: Schedulername
+                        type: string
+                        nullable: true
+                      priorityClassName:
+                        title: Priorityclassname
+                        type: string
+                        nullable: true
+                      enableServiceLinks:
+                        title: Enableservicelinks
+                        type: boolean
+                        nullable: true
+                    required:
+                    - containers
+                    title: PodSpec
+                    type: object
+                required:
+                - spec
+                title: PodTemplate
+                type: object
+              placement:
+                description: 'Where the operator may schedule installers.
+
+
+                  These settings steer the *scheduler*, which places installer Pods.
+                  They are
+
+                  not copied onto the emitted static workload, because kubelet never
+                  schedules a
+
+                  static Pod: it starts the file it finds on the node whose kubelet
+                  finds it.'
+                properties:
+                  nodeSelector:
+                    title: Nodeselector
+                    additionalProperties:
+                      type: string
+                    type: object
+                    nullable: true
+                  affinity:
+                    description: 'Scheduler affinity for the *installer* Pods.
+
+
+                      Only node affinity is supported. Pod affinity and anti-affinity
+                      describe
+
+                      co-location with other Pods, which a static Pod cannot honour
+                      because kubelet
+
+                      does not run the scheduler for it.'
+                    properties:
+                      nodeAffinity:
+                        description: The node-affinity half of scheduler placement.
+                        properties:
+                          requiredDuringSchedulingIgnoredDuringExecution:
+                            description: A required node-affinity selector.
+                            properties:
+                              nodeSelectorTerms:
+                                items:
+                                  description: 'A node selector term: the predicates
+                                    a node must satisfy.'
+                                  properties:
+                                    matchExpressions:
+                                      title: Matchexpressions
+                                      items:
+                                        description: One ``matchExpressions``/``matchFields``
+                                          predicate of a node selector term.
+                                        properties:
+                                          key:
+                                            minLength: 1
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            enum:
+                                            - In
+                                            - NotIn
+                                            - Exists
+                                            - DoesNotExist
+                                            - Gt
+                                            - Lt
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: &id015
+                                        - key
+                                        - operator
+                                        title: NodeSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                    matchFields:
+                                      title: Matchfields
+                                      items:
+                                        description: One ``matchExpressions``/``matchFields``
+                                          predicate of a node selector term.
+                                        properties:
+                                          key:
+                                            minLength: 1
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            enum:
+                                            - In
+                                            - NotIn
+                                            - Exists
+                                            - DoesNotExist
+                                            - Gt
+                                            - Lt
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id015
+                                        title: NodeSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  title: NodeSelectorTerm
+                                  type: object
+                                minItems: 1
+                                title: Nodeselectorterms
+                                type: array
+                            required:
+                            - nodeSelectorTerms
+                            title: NodeSelector
+                            type: object
+                            nullable: true
+                          preferredDuringSchedulingIgnoredDuringExecution:
+                            title: Preferredduringschedulingignoredduringexecution
+                            items:
+                              description: A weighted preferred node-affinity term.
+                              properties:
+                                weight:
+                                  maximum: 100
+                                  minimum: 1
+                                  title: Weight
+                                  type: integer
+                                preference:
+                                  description: 'A node selector term: the predicates
+                                    a node must satisfy.'
+                                  properties:
+                                    matchExpressions:
+                                      title: Matchexpressions
+                                      items:
+                                        description: One ``matchExpressions``/``matchFields``
+                                          predicate of a node selector term.
+                                        properties:
+                                          key:
+                                            minLength: 1
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            enum:
+                                            - In
+                                            - NotIn
+                                            - Exists
+                                            - DoesNotExist
+                                            - Gt
+                                            - Lt
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id015
+                                        title: NodeSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                    matchFields:
+                                      title: Matchfields
+                                      items:
+                                        description: One ``matchExpressions``/``matchFields``
+                                          predicate of a node selector term.
+                                        properties:
+                                          key:
+                                            minLength: 1
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            enum:
+                                            - In
+                                            - NotIn
+                                            - Exists
+                                            - DoesNotExist
+                                            - Gt
+                                            - Lt
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id015
+                                        title: NodeSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  title: NodeSelectorTerm
+                                  type: object
+                              required:
+                              - weight
+                              - preference
+                              title: PreferredSchedulingTerm
+                              type: object
+                            type: array
+                            nullable: true
+                        title: NodeAffinity
+                        type: object
+                        nullable: true
+                    title: Affinity
+                    type: object
+                    nullable: true
+                  tolerations:
+                    title: Tolerations
+                    items:
+                      description: A toleration an installer Pod must carry to be
+                        scheduled on a tainted node.
+                      properties:
+                        key:
+                          title: Key
+                          type: string
+                          nullable: true
+                        operator:
+                          title: Operator
+                          enum:
+                          - Exists
+                          - Equal
+                          type: string
+                          nullable: true
+                        value:
+                          title: Value
+                          type: string
+                          nullable: true
+                        effect:
+                          title: Effect
+                          enum:
+                          - NoSchedule
+                          - PreferNoSchedule
+                          - NoExecute
+                          type: string
+                          nullable: true
+                        tolerationSeconds:
+                          title: Tolerationseconds
+                          type: integer
+                          nullable: true
+                      title: Toleration
+                      type: object
+                    type: array
+                    nullable: true
+                  topologySpreadConstraints:
+                    title: Topologyspreadconstraints
+                    items:
+                      description: A supported topology spread constraint for installer
+                        placement.
+                      properties:
+                        maxSkew:
+                          minimum: 1
+                          title: Maxskew
+                          type: integer
+                        topologyKey:
+                          minLength: 1
+                          title: Topologykey
+                          type: string
+                        whenUnsatisfiable:
+                          default: DoNotSchedule
+                          enum:
+                          - DoNotSchedule
+                          - ScheduleAnyway
+                          title: Whenunsatisfiable
+                          type: string
+                        labelSelector:
+                          description: A label selector used by a topology spread
+                            constraint.
+                          properties:
+                            matchLabels:
+                              title: Matchlabels
+                              additionalProperties:
+                                type: string
+                              type: object
+                              nullable: true
+                            matchExpressions:
+                              title: Matchexpressions
+                              items:
+                                description: One predicate of a label selector.
+                                properties:
+                                  key:
+                                    minLength: 1
+                                    title: Key
+                                    type: string
+                                  operator:
+                                    enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    title: Operator
+                                    type: string
+                                  values:
+                                    title: Values
+                                    items:
+                                      type: string
+                                    type: array
+                                    nullable: true
+                                required:
+                                - key
+                                - operator
+                                title: LabelSelectorRequirement
+                                type: object
+                              type: array
+                              nullable: true
+                          title: LabelSelector
+                          type: object
+                          nullable: true
+                        minDomains:
+                          title: Mindomains
+                          type: integer
+                          nullable: true
+                      required:
+                      - maxSkew
+                      - topologyKey
+                      title: TopologySpreadConstraint
+                      type: object
+                    type: array
+                    nullable: true
+                title: Placement
+                type: object
+              update:
+                description: How a new revision is rolled out across installer placements.
+                properties:
+                  strategy:
+                    description: How a new revision replaces the placements that carry
+                      the old one.
+                    enum:
+                    - Recreate
+                    - Surge
+                    title: UpdateStrategy
+                    type: string
+                    default: Recreate
+                  maxSurge:
+                    default: 0
+                    maximum: 10
+                    minimum: 0
+                    title: Maxsurge
+                    type: integer
+                  maxUnavailable:
+                    default: 0
+                    maximum: 10
+                    minimum: 0
+                    title: Maxunavailable
+                    type: integer
+                  gracePeriodSeconds:
+                    default: 300
+                    minimum: 0
+                    title: Graceperiodseconds
+                    type: integer
+                title: UpdatePolicy
+                type: object
+              offline:
+                description: What must hold before a revision may be declared offline-ready.
+                properties:
+                  retainedRevisions:
+                    default: 2
+                    maximum: 10
+                    minimum: 1
+                    title: Retainedrevisions
+                    type: integer
+                  imageProvisioning:
+                    description: Who guarantees that an image is present on the node
+                      before it is needed.
+                    enum:
+                    - ExternallyProvisioned
+                    - VerifiedBeforeInstall
+                    title: ImageProvisioning
+                    type: string
+                    default: ExternallyProvisioned
+                  allowDisconnectedStart:
+                    default: true
+                    title: Allowdisconnectedstart
+                    type: boolean
+                title: OfflinePolicy
+                type: object
+              cleanup:
+                description: How the operator cleans up placements that are no longer
+                  wanted.
+                properties:
+                  onNodeUnreachable:
+                    description: What to do when a node holding a workload cannot
+                      be reached to clean up.
+                    enum:
+                    - Retain
+                    - AbandonAfterGrace
+                    title: NodeUnreachablePolicy
+                    type: string
+                    default: Retain
+                  abandonmentGraceSeconds:
+                    default: 3600
+                    minimum: 0
+                    title: Abandonmentgraceseconds
+                    type: integer
+                  removeConfigurationAfterAck:
+                    default: true
+                    title: Removeconfigurationafterack
+                    type: boolean
+                title: CleanupPolicy
+                type: object
+              policy:
+                description: Guards the static workload, whose manifest bypasses normal
+                  Pod admission.
+                properties:
+                  allowPrivileged:
+                    default: false
+                    title: Allowprivileged
+                    type: boolean
+                  allowInlineSecretEnv:
+                    default: false
+                    title: Allowinlinesecretenv
+                    type: boolean
+                title: WorkloadPolicy
+                type: object
+              installer:
+                description: The installer image and the exact host paths it is allowed
+                  to touch.
+                properties:
+                  image:
+                    minLength: 1
+                    title: Image
+                    type: string
+                  imagePullPolicy:
+                    description: 'Supported ``imagePullPolicy`` values.
+
+
+                      ``Never`` is the only policy that is safe on a disconnected
+                      host, because it
+
+                      never contacts a registry. ``IfNotPresent`` is the default and
+                      is safe as long
+
+                      as the image is already present.'
+                    enum:
+                    - Always
+                    - IfNotPresent
+                    - Never
+                    title: PullPolicy
+                    type: string
+                    default: IfNotPresent
+                  staticPodPath:
+                    default: /etc/kubernetes/manifests
+                    minLength: 1
+                    title: Staticpodpath
+                    type: string
+                  bundleDir:
+                    default: /var/lib/static-sets
+                    minLength: 1
+                    title: Bundledir
+                    type: string
+                  resources:
+                    description: Container resource requests and limits, passed through
+                      unchanged.
+                    properties:
+                      limits:
+                        title: Limits
+                        additionalProperties:
+                          type: string
+                        type: object
+                        nullable: true
+                      requests:
+                        title: Requests
+                        additionalProperties:
+                          type: string
+                        type: object
+                        nullable: true
+                    title: ResourceRequirements
+                    type: object
+                    nullable: true
+                required:
+                - image
+                title: InstallerSpec
+                type: object
+            required:
+            - mode
+            - template
+            - installer
+            title: StaticSetSpec
+            type: object
+          status:
+            description: What the operator reports about a StaticSet.
+            properties:
+              observedGeneration:
+                default: 0
+                title: Observedgeneration
+                type: integer
+              desiredRevision:
+                title: Desiredrevision
+                type: string
+                nullable: true
+              placements:
+                items:
+                  description: The installed state of one placement, as acknowledged
+                    by its installer.
+                  properties:
+                    identity:
+                      title: Identity
+                      type: string
+                    node:
+                      title: Node
+                      type: string
+                    revision:
+                      title: Revision
+                      type: string
+                      nullable: true
+                    phase:
+                      description: The lifecycle of one installer placement.
+                      enum:
+                      - Pending
+                      - Installed
+                      - Cleaning
+                      - Cleaned
+                      - Failed
+                      title: PlacementPhase
+                      type: string
+                      default: Pending
+                    acknowledged:
+                      default: false
+                      title: Acknowledged
+                      type: boolean
+                    generation:
+                      default: 0
+                      title: Generation
+                      type: integer
+                    message:
+                      title: Message
+                      type: string
+                      nullable: true
+                  required:
+                  - identity
+                  - node
+                  title: PlacementStatus
+                  type: object
+                title: Placements
+                type: array
+              health:
+                items:
+                  description: 'Observed health of a workload, kept separate from
+                    installed state.
+
+
+                    A placement can be ``Installed`` and simultaneously unhealthy,
+                    or
+
+                    ``Installed`` and unobservable because its node is unreachable.
+                    Health is
+
+                    never used to decide whether installation succeeded.'
+                  properties:
+                    identity:
+                      title: Identity
+                      type: string
+                    node:
+                      title: Node
+                      type: string
+                    observed:
+                      default: false
+                      title: Observed
+                      type: boolean
+                    phase:
+                      title: Phase
+                      type: string
+                      nullable: true
+                    ready:
+                      title: Ready
+                      type: boolean
+                      nullable: true
+                    restartCount:
+                      title: Restartcount
+                      type: integer
+                      nullable: true
+                    message:
+                      title: Message
+                      type: string
+                      nullable: true
+                  required:
+                  - identity
+                  - node
+                  title: WorkloadHealth
+                  type: object
+                title: Health
+                type: array
+              cleanup:
+                items:
+                  description: A persisted, authoritative cleanup intent for one placement.
+                  properties:
+                    identity:
+                      title: Identity
+                      type: string
+                    node:
+                      title: Node
+                      type: string
+                    revision:
+                      title: Revision
+                      type: string
+                      nullable: true
+                    generation:
+                      default: 0
+                      title: Generation
+                      type: integer
+                    reason:
+                      description: Why a placement is being cleaned up.
+                      enum:
+                      - ScaledDown
+                      - Deselected
+                      - Relocated
+                      - ResourceDeleted
+                      title: CleanupReason
+                      type: string
+                    state:
+                      description: Where a cleanup intent is in the protocol of section
+                        7.
+                      enum:
+                      - Requested
+                      - Queued
+                      - Acknowledged
+                      - Blocked
+                      - Abandoned
+                      title: CleanupState
+                      type: string
+                      default: Requested
+                    acknowledged:
+                      default: false
+                      title: Acknowledged
+                      type: boolean
+                    message:
+                      title: Message
+                      type: string
+                      nullable: true
+                  required:
+                  - identity
+                  - node
+                  - reason
+                  title: CleanupRecord
+                  type: object
+                title: Cleanup
+                type: array
+              conditions:
+                items:
+                  description: A standard Kubernetes-style condition.
+                  properties:
+                    type:
+                      title: Type
+                      type: string
+                    status:
+                      enum:
+                      - 'True'
+                      - 'False'
+                      - Unknown
+                      title: Status
+                      type: string
+                    reason:
+                      title: Reason
+                      type: string
+                    message:
+                      default: ''
+                      title: Message
+                      type: string
+                    observedGeneration:
+                      title: Observedgeneration
+                      type: integer
+                      nullable: true
+                    lastTransitionTime:
+                      title: Lasttransitiontime
+                      type: string
+                      nullable: true
+                  required:
+                  - type
+                  - status
+                  - reason
+                  title: Condition
+                  type: object
+                title: Conditions
+                type: array
+            title: StaticSetStatus
+            type: object
+            nullable: true
+        required:
+        - spec
+        title: StaticSet
+        type: object
+    subresources:
+      status: {}
