@@ -83,6 +83,21 @@ operation:
   never overwritten, so a resurrected older installer cannot reclaim a placement that
   has moved on.
 
+## The installer keeps reconciling
+
+An installer Pod runs `static-set-installer reconcile`, which repeats its pass every
+30 seconds (`--interval`) until it is stopped. One pass installs and acknowledges; the
+next ones notice configuration that changed, a revision that moved, and — most
+importantly — a cleanup intent that the operator published *after* the pass that had
+just finished. Running a single pass and exiting would leave that discovery to
+kubelet's container restart backoff, which grows to five minutes and makes a pending
+cleanup look like a stuck one.
+
+The loop never removes anything the API has not asked it to. If the API becomes
+unreachable it reports that it is offline, changes nothing, and keeps the last
+committed revision running until the API returns — never treating an unreachable API
+as an empty desired state.
+
 ## Installing a revision
 
 The order is chosen so that an interruption at any point leaves something consistent:

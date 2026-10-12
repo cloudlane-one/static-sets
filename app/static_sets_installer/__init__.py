@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -269,14 +270,26 @@ def main(
     environ: Mapping[str, str] | None = None,
     transport: Transport | None = None,
     now: str | None = None,
+    interval: float | None = None,
 ) -> int:
     """Run the installer command.
+
+    A ``reconcile`` keeps reconciling: it repeats its pass every ``interval`` seconds
+    until it is stopped. A placement has to notice configuration that changed, a
+    revision that moved, and above all a cleanup intent that the operator published
+    *after* the pass that finished a moment ago. Running once and exiting would leave
+    that discovery to kubelet's container restart backoff, which grows to five minutes
+    — long enough for a pending cleanup to look like a stuck one. A ``cleanup`` runs
+    its pass and stops, because a worker exists for exactly one placement's removal.
 
     Args:
         argv: The command-line arguments, defaulting to ``sys.argv[1:]``.
         environ: The environment, defaulting to :data:`os.environ`.
         transport: An alternative HTTP transport, used by tests.
-        now: The current time, RFC 3339, defaulting to the real clock.
+        now: The current time, RFC 3339, defaulting to the real clock. A loop reuses
+            it for every pass so that a test driving several passes sees one clock.
+        interval: Seconds between passes, defaulting to the parsed ``--interval``.
+            ``0`` runs a single pass, which is what the tests drive.
 
     Returns:
         The process exit status. Being offline is not a failure: the installer is a
@@ -298,13 +311,54 @@ def main(
         return 2
 
     api = ClusterApi(client)
+    if arguments.action == "cleanup":
+        return _single_pass(
+            api,
+            assignment,
+            timestamp=timestamp,
+            cleanup=True,
+            workload_running=arguments.workload_running,
+        )
+
+    period = arguments.interval if interval is None else interval
+    while True:
+        status = _single_pass(api, assignment, timestamp=timestamp, cleanup=False)
+        if status == 2 or period <= 0:
+            return status
+        try:
+            time.sleep(period)
+        except KeyboardInterrupt:  # pragma: no cover - depends on a signal
+            return 0
+
+
+def _single_pass(
+    api: ClusterApi,
+    assignment: Assignment,
+    *,
+    timestamp: str,
+    cleanup: bool,
+    workload_running: bool = False,
+) -> int:
+    """Run one reconcile or cleanup pass and publish its result.
+
+    Args:
+        api: The cluster API.
+        assignment: The installer's assignment.
+        timestamp: The time to record on the report.
+        cleanup: Whether this is a cleanup pass rather than a reconcile.
+        workload_running: Whether the static workload is still running, which decides
+            whether its configuration may be removed.
+
+    Returns:
+        The process exit status for this pass.
+    """
     try:
-        if arguments.action == "cleanup":
+        if cleanup:
             report = cleanup_placement(
                 assignment,
                 api=api,
                 now=timestamp,
-                terminated=not arguments.workload_running,
+                terminated=not workload_running,
             )
         else:
             report = reconcile(assignment, api=api, now=timestamp)
@@ -312,6 +366,12 @@ def main(
         _publish(api, assignment, _failure(assignment, str(error)))
         print(json.dumps({"event": "not-offline-ready", "error": str(error)}))
         return 1
+    except ApiUnavailableError as error:
+        # The API is unreachable, which is a state to keep working through and not a
+        # verdict about the StaticSet: nothing local is touched and the last committed
+        # revision keeps running.
+        print(json.dumps({"event": "offline", "error": str(error)}))
+        return 0
     except StaticSetsError as error:
         _publish(api, assignment, _failure(assignment, str(error)))
         print(json.dumps({"event": "failed", "error": str(error)}))
@@ -319,7 +379,7 @@ def main(
 
     _publish(api, assignment, report)
     print(json.dumps({"event": "reconciled", **report.payload()}))
-    if arguments.action == "cleanup" and report.acknowledged and assignment.placement:
+    if cleanup and report.acknowledged and assignment.placement:
         api.release_self(assignment.namespace, assignment.instance)
     return 0
 
@@ -349,6 +409,12 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
         type=float,
         default=15.0,
         help="seconds to wait for the API server before treating it as unreachable",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=30.0,
+        help="seconds between reconcile passes; 0 runs one pass and exits",
     )
     parser.add_argument(
         "--workload-running",

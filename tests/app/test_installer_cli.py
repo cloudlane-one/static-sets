@@ -12,6 +12,7 @@ import pytest
 
 from static_sets.errors import StaticSetsError
 from static_sets.naming import COMPONENT_LABEL, PLACEMENT_COMPONENT, PLACEMENT_LABEL, SET_LABEL
+import static_sets_installer as installer_cli
 from static_sets_installer import (
     ClusterApi,
     assignment_from_environment,
@@ -367,6 +368,7 @@ def test_main_reconciles_a_placement_end_to_end(temp_roots: tuple[Path, Path]) -
         environ=environment(temp_roots),
         transport=transport,
         now="2026-10-12T10:00:00+00:00",
+        interval=0.0,
     )
 
     assert status == 0
@@ -385,7 +387,7 @@ def test_main_treats_an_unreachable_api_as_a_non_failure(
     def broken(*_: Any) -> tuple[int, bytes]:
         raise OSError("no route to host")
 
-    status = main([], environ=environment(temp_roots), transport=broken)
+    status = main([], environ=environment(temp_roots), transport=broken, interval=0.0)
 
     assert status == 0
     manifests, _ = temp_roots
@@ -413,6 +415,7 @@ def test_main_fails_closed_when_images_cannot_be_verified(
         environ=environment(temp_roots),
         transport=transport,
         now="2026-10-12T10:00:00+00:00",
+        interval=0.0,
     )
 
     assert status == 1
@@ -423,7 +426,13 @@ def test_main_fails_closed_when_images_cannot_be_verified(
 def test_main_runs_a_cleanup_and_releases_itself(temp_roots: tuple[Path, Path]) -> None:
     """A cleanup worker removes the workload, acknowledges, and clears its finalizer."""
     transport, _ = serving_transport(temp_roots)
-    main([], environ=environment(temp_roots), transport=transport, now="2026-10-12T10:00:00+00:00")
+    main(
+        [],
+        environ=environment(temp_roots),
+        transport=transport,
+        now="2026-10-12T10:00:00+00:00",
+        interval=0.0,
+    )
     manifests, _ = temp_roots
     assert list(manifests.glob("*.yaml"))
 
@@ -473,7 +482,13 @@ def test_main_with_a_running_workload_keeps_its_configuration(
 ) -> None:
     """A worker told the workload is still running does not delete its files."""
     transport, _ = serving_transport(temp_roots)
-    main([], environ=environment(temp_roots), transport=transport, now="2026-10-12T10:00:00+00:00")
+    main(
+        [],
+        environ=environment(temp_roots),
+        transport=transport,
+        now="2026-10-12T10:00:00+00:00",
+        interval=0.0,
+    )
     manifests, bundle = temp_roots
     revisions = list((bundle / "placements").glob("*/revisions/*"))
     assert revisions
@@ -576,3 +591,37 @@ def test_a_republished_placement_keeps_the_labels_the_operator_wrote() -> None:
     updated = client.calls[1][2]
     assert updated["metadata"]["labels"]["kept"] == "yes"
     assert updated["metadata"]["annotations"] == {"note": "from the operator"}
+
+
+def test_the_installer_keeps_reconciling_until_it_is_stopped(
+    monkeypatch: pytest.MonkeyPatch, temp_roots: tuple[Path, Path]
+) -> None:
+    """A placement has to notice a cleanup intent published after its last pass.
+
+    Running one pass and exiting would leave that discovery to kubelet's container
+    restart backoff, which grows to five minutes — long enough for a pending cleanup
+    to look like a stuck one. The pass runs, then the loop waits the interval, and
+    being stopped is a clean exit rather than a failure.
+    """
+    transport, calls = serving_transport(temp_roots)
+    waited: list[float] = []
+
+    def stop_after_the_wait(seconds: float) -> None:
+        waited.append(seconds)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(installer_cli.time, "sleep", stop_after_the_wait)
+
+    status = main(
+        [],
+        environ=environment(temp_roots),
+        transport=transport,
+        now="2026-10-12T10:00:00+00:00",
+        interval=7.0,
+    )
+
+    assert status == 0
+    assert waited == [7.0]
+    assert any(method == "POST" for method, _ in calls)
+    manifests, _ = temp_roots
+    assert list(manifests.glob("*.yaml")), "the pass ran before the loop waited"
