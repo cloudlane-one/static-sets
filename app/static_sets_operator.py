@@ -38,7 +38,10 @@ from static_sets.models import StaticSet
 from static_sets.naming import (
     MANAGED_BY,
     MIRROR_ANNOTATION,
+    COMPONENT_LABEL,
+    PLACEMENT_COMPONENT,
     PLACEMENT_LABEL,
+    SET_LABEL,
     STATIC_SET_FINALIZER,
     placement_configmap_name,
 )
@@ -60,8 +63,6 @@ PLURAL = "staticsets"
 WEBHOOK_ENV = "STATIC_SETS_WEBHOOK"
 """The environment variable the chart uses to say whether admissions are served."""
 
-SET_LABEL = "staticsets.cloudlane.dev/set"
-"""Label tying every object the operator creates to its StaticSet."""
 
 STATIC_SET_PATH = f"/apis/{GROUP}/{VERSION}/namespaces/{{namespace}}/{PLURAL}/{{name}}"
 """The REST path of a StaticSet."""
@@ -82,7 +83,7 @@ APP_COLLECTIONS = (
 """Both installer workload collections, so a mode switch leaves nothing behind."""
 
 INSTALLER_COMPONENT = "installer"
-PLACEMENT_COMPONENT = "placement"
+"""Value of ``app.kubernetes.io/component`` on the installer workload."""
 
 TIMER_INTERVAL = 120
 """Seconds between periodic re-reconciles, so pending cleanups are retried."""
@@ -139,9 +140,7 @@ def read_snapshot(client: JsonClient, resource: StaticSet) -> ObservedState:
         "GET",
         CONFIG_MAPS_PATH.format(namespace=namespace),
         params={
-            "labelSelector": selector(
-                **{"app.kubernetes.io/component": PLACEMENT_COMPONENT, SET_LABEL: name}
-            )
+            "labelSelector": selector(**{COMPONENT_LABEL: PLACEMENT_COMPONENT, SET_LABEL: name})
         },
         missing={},
     )
@@ -274,7 +273,7 @@ def _installer_pod(item: dict[str, Any]) -> InstallerPod | None:
     """
     metadata = item.get("metadata", {})
     labels = metadata.get("labels") or {}
-    if labels.get("app.kubernetes.io/component") != INSTALLER_COMPONENT:
+    if labels.get(COMPONENT_LABEL) != INSTALLER_COMPONENT:
         return None
     if MIRROR_ANNOTATION in (metadata.get("annotations") or {}):
         return None
@@ -406,7 +405,7 @@ def _publish_intent(client: JsonClient, namespace: str, action: CleanupAction) -
             "namespace": namespace,
             "labels": {
                 "app.kubernetes.io/managed-by": MANAGED_BY,
-                "app.kubernetes.io/component": PLACEMENT_COMPONENT,
+                COMPONENT_LABEL: PLACEMENT_COMPONENT,
                 SET_LABEL: static_set,
                 PLACEMENT_LABEL: action.identity,
             },

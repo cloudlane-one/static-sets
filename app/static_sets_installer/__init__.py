@@ -19,6 +19,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from static_sets.api import ApiRequestError, JsonClient, KubernetesClient, Transport
 from static_sets.errors import NotOfflineReadyError, StaticSetsError
@@ -30,6 +31,13 @@ from static_sets.installer import (
     reconcile,
 )
 from static_sets.models import StaticSet
+from static_sets.naming import (
+    MANAGED_BY,
+    COMPONENT_LABEL,
+    PLACEMENT_COMPONENT,
+    PLACEMENT_LABEL,
+    SET_LABEL,
+)
 
 __all__ = [
     "ClusterApi",
@@ -48,11 +56,6 @@ SECRET_PATH = "/api/v1/namespaces/{namespace}/secrets/{name}"
 
 POD_PATH = "/api/v1/namespaces/{namespace}/pods/{name}"
 """The REST path of a Pod."""
-
-PLACEMENT_LABEL = "staticsets.cloudlane.dev/placement"
-"""Label marking an object as belonging to one placement."""
-
-_MANAGED_BY = "static-sets"
 
 
 class ClusterApi:
@@ -148,13 +151,22 @@ class ClusterApi:
             return None
         return dict(body.get("data") or {})
 
-    def publish_placement(self, namespace: str, name: str, payload: Mapping[str, str]) -> None:
+    def publish_placement(
+        self,
+        namespace: str,
+        name: str,
+        payload: Mapping[str, str],
+        *,
+        static_set: str,
+    ) -> None:
         """Create or update the ConfigMap a placement is acknowledged through.
 
         Args:
             namespace: The ConfigMap's namespace.
             name: The ConfigMap's name.
             payload: The acknowledgment payload.
+            static_set: The owning StaticSet's name, which is one of the labels the
+                operator selects placement records by.
 
         Raises:
             ApiUnavailableError: If the API could not be reached.
@@ -162,18 +174,25 @@ class ClusterApi:
         """
         path = CONFIG_MAP_PATH.format(namespace=namespace, name=name)
         existing = self.client.json("GET", path, missing={})
-        manifest = {
+        # The object the operator published carries labels it selects this record by,
+        # so they are merged rather than replaced: an acknowledgment written with a
+        # label set of its own is one the controller never sees.
+        published = dict((existing.get("metadata") or {}).get("labels") or {})
+        labels = {
+            **published,
+            "app.kubernetes.io/managed-by": MANAGED_BY,
+            COMPONENT_LABEL: PLACEMENT_COMPONENT,
+            SET_LABEL: static_set,
+            PLACEMENT_LABEL: payload.get("placement", ""),
+        }
+        metadata: dict[str, Any] = {"name": name, "namespace": namespace, "labels": labels}
+        annotations = (existing.get("metadata") or {}).get("annotations")
+        if annotations:
+            metadata["annotations"] = dict(annotations)
+        manifest: dict[str, Any] = {
             "apiVersion": "v1",
             "kind": "ConfigMap",
-            "metadata": {
-                "name": name,
-                "namespace": namespace,
-                "labels": {
-                    "app.kubernetes.io/managed-by": _MANAGED_BY,
-                    "app.kubernetes.io/component": "placement",
-                    PLACEMENT_LABEL: payload.get("placement", ""),
-                },
-            },
+            "metadata": metadata,
             "data": dict(payload),
         }
         if existing:
@@ -200,7 +219,7 @@ class ClusterApi:
                 "PATCH",
                 path,
                 body={"metadata": {"finalizers": []}},
-                params={"fieldManager": _MANAGED_BY},
+                params={"fieldManager": MANAGED_BY},
             )
             self.client.json("DELETE", path, body={"gracePeriodSeconds": 0})
         except (ApiUnavailableError, ApiRequestError) as error:
@@ -352,6 +371,7 @@ def _publish(api: ClusterApi, assignment: Assignment, report: PlacementReport) -
             assignment.namespace,
             _placement_name(assignment),
             report.payload(),
+            static_set=assignment.static_set,
         )
     except (ApiUnavailableError, ApiRequestError) as error:
         print(json.dumps({"event": "acknowledgment-failed", "error": str(error)}))

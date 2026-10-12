@@ -38,6 +38,21 @@ __all__ = [
 MANAGED_BY = "static-sets"
 """Value of the ``app.kubernetes.io/managed-by`` label on every owned object."""
 
+SET_LABEL = "staticsets.cloudlane.dev/set"
+"""Label naming the StaticSet that owns an object the operator created.
+
+Both the operator and the installer write objects that are read back by selector,
+so the label lives here. When each side spelled it out for itself they disagreed:
+the operator selected on a label the installer never wrote, and no acknowledgment
+was ever observed.
+"""
+
+COMPONENT_LABEL = "app.kubernetes.io/component"
+"""Label key naming what an object is: an installer, a placement, a cleanup worker."""
+
+PLACEMENT_COMPONENT = "placement"
+"""Value of ``app.kubernetes.io/component`` on a placement record."""
+
 PLACEMENT_LABEL = "staticsets.cloudlane.dev/placement"
 """Label holding a placement identity, used to find an owned cleanup worker."""
 

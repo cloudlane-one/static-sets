@@ -127,13 +127,22 @@ class PlacementApi(Protocol):
         """
         ...
 
-    def publish_placement(self, namespace: str, name: str, payload: Mapping[str, str]) -> None:
+    def publish_placement(
+        self,
+        namespace: str,
+        name: str,
+        payload: Mapping[str, str],
+        *,
+        static_set: str,
+    ) -> None:
         """Create or update the ConfigMap an installer acknowledges through.
 
         Args:
             namespace: The ConfigMap's namespace.
             name: The ConfigMap's name.
             payload: The acknowledgment payload.
+            static_set: The owning StaticSet's name, which the record is labelled
+                with so the operator can select it.
 
         Raises:
             ApiUnavailable: If the API cannot be reached.

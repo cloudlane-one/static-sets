@@ -77,10 +77,13 @@ class FakeApi:
         self._guard("get_secret")
         return None
 
-    def publish_placement(self, namespace: str, name: str, payload: Mapping[str, str]) -> None:
-        """Record the published acknowledgment payload."""
+    def publish_placement(
+        self, namespace: str, name: str, payload: Mapping[str, str], *, static_set: str
+    ) -> None:
+        """Record the published acknowledgment payload and the set it names."""
         self._guard("publish_placement")
         self.published = dict(payload)
+        self.published_for = static_set
 
     def get_placement(self, namespace: str, name: str) -> Mapping[str, str] | None:
         """Return the configured placement payload."""

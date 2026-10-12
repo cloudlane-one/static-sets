@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from static_sets.errors import StaticSetsError
+from static_sets.naming import COMPONENT_LABEL, PLACEMENT_COMPONENT, PLACEMENT_LABEL, SET_LABEL
 from static_sets_installer import (
     ClusterApi,
     assignment_from_environment,
@@ -275,8 +276,13 @@ def test_cluster_api_creates_then_updates_a_placement() -> None:
     client = FakeJsonClient()
     api = ClusterApi(client)
 
-    api.publish_placement(NAMESPACE, "web-placement-id1", {"placement": "id1"})
-    api.publish_placement(NAMESPACE, "web-placement-id1", {"placement": "id1", "state": "Removed"})
+    api.publish_placement(NAMESPACE, "web-placement-id1", {"placement": "id1"}, static_set="web")
+    api.publish_placement(
+        NAMESPACE,
+        "web-placement-id1",
+        {"placement": "id1", "state": "Removed"},
+        static_set="web",
+    )
 
     methods = [method for method, path, _ in client.calls]
     assert methods == ["GET", "POST", "GET", "PUT"]
@@ -532,3 +538,41 @@ def test_the_module_entry_point_runs_the_command(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "invalid-environment" in result.stdout
+
+
+def test_a_published_placement_carries_the_labels_the_operator_selects_by() -> None:
+    """The operator finds acknowledgments by label, so the labels have to agree.
+
+    They did not: the installer wrote a label set of its own, the operator selected on
+    one the installer never wrote, and no acknowledgment was ever observed. Both sides
+    now take the keys from the same module, and this pins that the record really is
+    written with them.
+    """
+    client = FakeJsonClient()
+    api = ClusterApi(client)
+
+    api.publish_placement(NAMESPACE, "web-placement-id1", {"placement": "id1"}, static_set="web")
+
+    created = client.calls[1][2]
+    labels = created["metadata"]["labels"]
+    assert labels[SET_LABEL] == "web"
+    assert labels[COMPONENT_LABEL] == PLACEMENT_COMPONENT
+    assert labels[PLACEMENT_LABEL] == "id1"
+
+
+def test_a_republished_placement_keeps_the_labels_the_operator_wrote() -> None:
+    """An acknowledgment merges into the record instead of replacing its labels."""
+    existing = {
+        "metadata": {
+            "labels": {"staticsets.cloudlane.dev/set": "web", "kept": "yes"},
+            "annotations": {"note": "from the operator"},
+        }
+    }
+    client = FakeJsonClient({config_map_path("web-placement-id1"): existing})
+    api = ClusterApi(client)
+
+    api.publish_placement(NAMESPACE, "web-placement-id1", {"placement": "id1"}, static_set="web")
+
+    updated = client.calls[1][2]
+    assert updated["metadata"]["labels"]["kept"] == "yes"
+    assert updated["metadata"]["annotations"] == {"note": "from the operator"}
