@@ -38,6 +38,21 @@ Helm is needed by `tests/app/test_manifests.py`, which renders the chart. That t
 **fails rather than skips** when `helm` is missing while `CI` is set, so a CI image that
 loses Helm cannot pass vacuously.
 
+### Run the suite on Linux before trusting it
+
+Several tests create symbolic links, which Windows refuses without Developer Mode, so
+they **skip** on a Windows workstation and run on the Linux CI runner. A change that
+only breaks on the LINUX branch therefore looks green locally. Reproduce the CI run in
+a container before pushing:
+
+```shell
+docker run --rm -v "$PWD:/src" -w /src python:3.13-slim sh -c '
+  apt-get update -qq && apt-get install -y -qq git
+  pip install -q pytest pytest-cov pyyaml
+  UV_DYNAMIC_VERSIONING_BYPASS=0.0.0 pip install -q .
+  python -m pytest tests -q'
+```
+
 ## Suites that need real infrastructure
 
 They skip by default and are opt-in, because they build images or drive clusters:

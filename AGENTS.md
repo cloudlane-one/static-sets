@@ -69,6 +69,10 @@ STATIC_SETS_K8S_INTEGRATION=1 uv run pytest tests/test_e2e.py -v          # kind
 - **Every pydantic validator raises `ValueError`.** Pydantic only turns `ValueError`
   (and `AssertionError`) into a `ValidationError`; a custom exception escapes
   validation and surfaces as a crash instead of a rejected object.
+- **The symlink tests skip on Windows and run on Linux CI.** A change that only breaks
+  on the Linux branch looks green on a Windows workstation. Run the suite in a Linux
+  container before pushing if you touched `paths.py` or anything the installer writes —
+  the recipe is in [How to check quality](./docs/how-to-check-quality.md).
 - **Commit with a Gitmoji shortcode in text form at the start of the subject**
   (`:sparkles: …`, `:bug: …`, `:memo: …`). A rendered emoji glyph never matches the
   `emoji` commit parser, so the release is silently skipped.

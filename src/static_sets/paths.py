@@ -156,25 +156,22 @@ def join_within(base: str, *parts: str) -> str:
     return normalize_absolute(candidate)
 
 
-def assert_no_symlink(path: Path, *, follow_final: bool = True) -> None:
+def assert_no_symlink(path: Path) -> None:
     """Refuse to operate on a path whose components include a symbolic link.
 
-    The installer only creates regular directories and files, so a symlink on the
-    way to a file it is about to overwrite means somebody else arranged for it to
-    write somewhere unexpected.
+    The installer only creates regular directories and files, so a symlink anywhere
+    on the way to a file it is about to write — the file itself included — means
+    somebody else arranged for it to write somewhere unexpected, or is pointing at a
+    file the installer does not own. Both are refusals: the protocol only touches its
+    own files.
 
     Args:
         path: The path to inspect.
-        follow_final: Whether a symlink at ``path`` itself is an error. Callers
-            that are about to create the path pass ``False``.
 
     Raises:
-        PathSecurityError: If any component up to ``path`` is a symlink.
+        PathSecurityError: If any component of ``path`` is a symbolic link.
     """
-    components = list(path.parents)[::-1] + [path]
-    for candidate in components:
-        if candidate == path and not follow_final:
-            break
+    for candidate in [*path.parents][::-1] + [path]:
         if candidate.is_symlink():
             raise PathSecurityError(f"{candidate} is a symbolic link; refusing to write")
 
@@ -203,8 +200,7 @@ def atomic_write(
         PathSecurityError: If a component of ``path`` is a symbolic link.
     """
     path.parent.mkdir(parents=True, exist_ok=True, mode=directory_mode)
-    assert_no_symlink(path.parent)
-    assert_no_symlink(path, follow_final=False)
+    assert_no_symlink(path)
     temporary = path.with_name(f".{path.name}.tmp")
     descriptor = os.open(temporary, _WRITE_FLAGS, mode)
     try:
