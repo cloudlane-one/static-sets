@@ -500,8 +500,13 @@ def deployed() -> Iterator[dict[str, Any]]:
         yield {"namespace": namespace, "release": release, "image": image}
     finally:
         _run("helm", "uninstall", release, "--namespace", namespace, check=False)
-        _kubectl("delete", "namespace", namespace, "--ignore-not-found", check=False)
-        _kubectl("delete", "crd", CRD_NAME, "--ignore-not-found", check=False)
+        # The CRD goes before the namespace. Removing it removes every StaticSet with
+        # it, finalizers included, so a StaticSet whose cleanup never completed cannot
+        # hold the namespace in Terminating and stall the rest of the run.
+        _kubectl("delete", "crd", CRD_NAME, "--ignore-not-found", "--wait=false", check=False)
+        _kubectl(
+            "delete", "namespace", namespace, "--ignore-not-found", "--wait=false", check=False
+        )
         _run("docker", "rmi", "-f", image, check=False)
 
 
