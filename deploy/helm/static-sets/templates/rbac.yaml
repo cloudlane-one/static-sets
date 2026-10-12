@@ -110,8 +110,38 @@ subjects:
     name: {{ include "static-sets.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
-# Nodes are cluster-scoped, so placement and reachability reporting need exactly
-# one cluster-scoped read rule and nothing else.
+# kopf manages one watch per namespace and starts and stops them as namespaces appear
+# and disappear, so it has to be able to read them. This is the framework's own
+# requirement — it is the same rule the based-operators chart ships — and it is the
+# reason the operator is not purely namespaced.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-namespace-reader
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-namespace-reader
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-namespace-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "static-sets.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Nodes are cluster-scoped too: placement and reachability reporting need this read,
+# and nothing else about a node.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
