@@ -13,15 +13,19 @@ The controller never touches a host filesystem. Static Pods are written by the
 by a restricted cleanup worker pinned to the node. The controller's job is to decide
 what should exist and to report what it observed.
 
-A validating admission webhook is registered alongside the reconciler. It exists
-because the generated CRD is a structural schema, which *prunes* an unknown field
-instead of refusing it; the webhook turns that silent drop into a rejection. Deploy
-with ``--webhook`` to enable it.
+A validating admission webhook is registered alongside the reconciler — but only when
+one is actually being served. It exists because the generated CRD is a structural
+schema, which *prunes* an unknown field instead of refusing it; the webhook turns that
+silent drop into a rejection. The chart sets ``STATIC_SETS_WEBHOOK=1`` (and imports
+``based_operators.webhook`` to configure the server) when its ``webhook.enabled`` is
+on, and leaves the handler unregistered otherwise, because kopf refuses to start when
+admission handlers exist with no admission server to serve them.
 """
 
 from __future__ import annotations
 
 import datetime
+import os
 from typing import Any
 
 import kopf
@@ -52,6 +56,9 @@ __all__ = [
 GROUP = "staticsets.cloudlane.dev"
 VERSION = "v1"
 PLURAL = "staticsets"
+
+WEBHOOK_ENV = "STATIC_SETS_WEBHOOK"
+"""The environment variable the chart uses to say whether admissions are served."""
 
 SET_LABEL = "staticsets.cloudlane.dev/set"
 """Label tying every object the operator creates to its StaticSet."""
@@ -492,7 +499,6 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
 
 
-@kopf.on.validate(GROUP, VERSION, PLURAL, operations=["CREATE", "UPDATE"])
 def validate_static_set(**kwargs: Any) -> None:
     """Refuse an object the operator could not service.
 
@@ -503,3 +509,14 @@ def validate_static_set(**kwargs: Any) -> None:
         kopf.AdmissionError: If the object has problems.
     """
     reject_unsupported(kwargs["body"])
+
+
+# The handler is registered only when admissions are actually being served. kopf
+# refuses to start at all when admission handlers exist but no admission server is
+# configured in ``settings.admission.server`` — and that server is configured by
+# ``based_operators.webhook``, which the chart imports with ``-m`` only when its
+# webhook is enabled. Registering unconditionally therefore crash-loops the controller
+# in the default deployment, and the switch is the chart's own environment variable
+# rather than a guess from the command line.
+if os.environ.get(WEBHOOK_ENV) == "1":
+    kopf.on.validate(GROUP, VERSION, PLURAL, operations=["CREATE", "UPDATE"])(validate_static_set)

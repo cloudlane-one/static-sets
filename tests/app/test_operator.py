@@ -8,11 +8,13 @@ resource it declares.
 
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-
-import logging
 
 import kopf
 import pytest
@@ -446,3 +448,54 @@ def test_finalize_releases_the_finalizer_when_cleanup_is_done(
     operator.finalize(resource, patch, LOGGER)
 
     assert dict(patch.metadata)["finalizers"] == ["other"]
+
+
+ADMISSION_PROBE = (
+    "import runpy, kopf;"
+    "runpy.run_path('app/static_sets_operator.py');"
+    "print(len(kopf.get_default_registry()._webhooks.get_all_handlers()))"
+)
+"""Counts the admission handlers a fresh interpreter registers on import."""
+
+
+def admission_handler_count(webhook: str | None) -> int:
+    """Import the entry point in a fresh interpreter and count its admission handlers.
+
+    Registration happens at import time, so it cannot be observed in this process:
+    the module is already in ``sys.modules`` and its registry already populated.
+
+    Args:
+        webhook: The value of the operator's webhook environment variable, or
+            ``None`` to leave it unset.
+
+    Returns:
+        The number of admission handlers the import registered.
+    """
+    environment = dict(os.environ)
+    environment.pop(operator.WEBHOOK_ENV, None)
+    if webhook is not None:
+        environment[operator.WEBHOOK_ENV] = webhook
+    environment["PYTHONPATH"] = os.pathsep.join([str(REPO_ROOT / "src"), str(REPO_ROOT / "app")])
+    result = subprocess.run(
+        [sys.executable, "-c", ADMISSION_PROBE],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=environment,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr
+    return int(result.stdout.strip())
+
+
+def test_the_admission_handler_is_registered_only_while_admissions_are_served() -> None:
+    """kopf refuses to start when admission handlers exist with nothing to serve them.
+
+    The chart's default deployment does not serve admissions, so registering the
+    handler unconditionally leaves the controller in a crash loop — which the
+    end-to-end suite caught and no unit test could, because the handler function
+    itself behaves correctly either way. This pins the registration, not the handler.
+    """
+    assert admission_handler_count(None) == 0
+    assert admission_handler_count("0") == 0
+    assert admission_handler_count("1") == 1
