@@ -14,7 +14,12 @@ from static_sets.controller import (
 )
 from static_sets.models import CleanupState, PlacementPhase
 from static_sets.naming import placement_identity
-from static_sets.placement import InstallerPod, NodeInfo, ObservedPlacement
+from static_sets.placement import (
+    INSTALLER_SERVICE_ACCOUNT_ENV,
+    InstallerPod,
+    NodeInfo,
+    ObservedPlacement,
+)
 
 NOW = "2026-10-12T10:00:00Z"
 UID = "0f9a4b6c-1111-2222-3333-444455556666"
@@ -433,3 +438,28 @@ def test_both_modes_apply_a_workload(make_static_set: Any, mode: str) -> None:
 
     assert result.workload is not None
     assert result.workload[0] == mode
+
+
+def test_a_cleanup_worker_runs_as_the_same_account_as_the_installer(
+    make_static_set: Any, monkeypatch: Any
+) -> None:
+    """The worker writes the same directories, so it needs the same permissions.
+
+    Both names come from the environment the chart sets, which is what keeps them
+    from drifting apart — a worker naming an account that does not exist would never
+    start, and the placement would never be cleaned up.
+    """
+    monkeypatch.setenv(INSTALLER_SERVICE_ACCOUNT_ENV, "custom-installer")
+    resource = make_static_set(spec={"replicas": 1})
+
+    worker = cleanup_worker_pod(
+        resource,
+        namespace="edge",
+        identity="abcdef0123",
+        node="worker-1",
+        generation=3,
+        reason="ScaleDown",
+        pod_name="web-abcdef0123",
+    )
+
+    assert worker["spec"]["serviceAccountName"] == "custom-installer"

@@ -52,6 +52,7 @@ from static_sets.placement import (
     BUNDLE_MOUNT,
     INSTALLER_CONTAINER,
     STATIC_POD_MOUNT,
+    installer_service_account,
     InstallerPod,
     NodeInfo,
     ObservedPlacement,
@@ -848,7 +849,7 @@ def cleanup_worker_pod(
         "spec": {
             "restartPolicy": "Never",
             "nodeName": node,
-            "serviceAccountName": f"{static_set.metadata.name}-installer",
+            "serviceAccountName": installer_service_account(),
             "enableServiceLinks": False,
             "securityContext": {"runAsUser": 0, "seccompProfile": {"type": "RuntimeDefault"}},
             "containers": [

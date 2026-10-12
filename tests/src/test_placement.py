@@ -8,6 +8,8 @@ import pytest
 
 from static_sets.naming import installer_labels
 from static_sets.placement import (
+    DEFAULT_INSTALLER_SERVICE_ACCOUNT,
+    INSTALLER_SERVICE_ACCOUNT_ENV,
     InstallerPod,
     NodeInfo,
     eligible_nodes,
@@ -321,3 +323,31 @@ def test_recreate_strategy_stays_recreate(make_static_set: Any) -> None:
     _, manifest = installer_workload(resource, namespace="edge", generation=1)
 
     assert manifest["spec"]["strategy"] == {"type": "Recreate"}
+
+
+def test_the_installer_runs_as_the_account_the_environment_names(
+    make_static_set: Any, monkeypatch: Any
+) -> None:
+    """The chart owns the account and tells the operator its name."""
+    monkeypatch.setenv(INSTALLER_SERVICE_ACCOUNT_ENV, "custom-installer")
+
+    _, manifest = installer_workload(
+        make_static_set(spec={"replicas": 1}), namespace="edge", generation=1
+    )
+
+    pod = manifest["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == "custom-installer"
+
+
+def test_the_installer_falls_back_to_the_chart_default_account(
+    make_static_set: Any, monkeypatch: Any
+) -> None:
+    """Running without the chart still names an account rather than none."""
+    monkeypatch.delenv(INSTALLER_SERVICE_ACCOUNT_ENV, raising=False)
+
+    _, manifest = installer_workload(
+        make_static_set(spec={"replicas": 1}), namespace="edge", generation=1
+    )
+
+    pod = manifest["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == DEFAULT_INSTALLER_SERVICE_ACCOUNT

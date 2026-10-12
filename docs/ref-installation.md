@@ -182,6 +182,12 @@ on a suitably protected filesystem, remain the operator's responsibility.
 
 **Least privilege.** The installer's ServiceAccount may read the StaticSet and its
 configuration, write its own acknowledgment objects, and release its own finalizer —
-in one namespace. The controller's is wider (it creates the installer workload, reads
-nodes, observes mirror Pods) but still namespaced except for the single `nodes` read.
-Neither may touch the other's workloads.
+in one namespace. It is **one account, shared by every installer in that namespace**:
+an account per StaticSet would mean the operator holding permission to create
+ServiceAccounts, Roles and RoleBindings, which is a privilege it does not ask for. An
+administrator who needs that isolation can point the chart's
+`installer.serviceAccountName` at an account they manage themselves. The controller's
+account is wider (it creates the installer workload, reads nodes, observes mirror
+Pods) but still namespaced, except for two cluster-scoped reads: `nodes`, for placement
+and reachability, and `namespaces`, which kopf itself requires because it manages one
+watch per namespace. Neither account may touch the other's workloads.

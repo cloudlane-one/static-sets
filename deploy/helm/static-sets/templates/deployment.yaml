@@ -64,6 +64,11 @@ spec:
           env:
             - name: STATIC_SETS_WEBHOOK
               value: {{ ternary "1" "0" .Values.webhook.enabled | quote }}
+            # The installer workload and the cleanup workers run as this account. The
+            # chart owns the account, so it tells the operator which name it created
+            # rather than letting the operator invent one admission would refuse.
+            - name: STATIC_SETS_INSTALLER_SERVICE_ACCOUNT
+              value: {{ include "static-sets.installerServiceAccountName" . | quote }}
             {{- if .Values.webhook.enabled }}
             - name: WEBHOOK_CERT_DIR
               value: /etc/webhook/certs

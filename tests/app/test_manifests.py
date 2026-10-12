@@ -266,3 +266,59 @@ def test_dockerignore_excludes_build_output() -> None:
     assert ".venv/" in ignored
     assert "build/" in ignored
     assert "dist/" in ignored
+
+
+def test_the_operator_is_told_which_installer_account_the_chart_created() -> None:
+    """The installer workload runs as an account the chart actually creates.
+
+    A Pod that names a ServiceAccount which does not exist is refused at admission,
+    so if the chart tells the operator a different name than it provisions — or tells
+    it nothing at all — the installers can never start. This is the cross-check
+    between what the chart creates and what the operator is told to use.
+    """
+    rendered = render_chart()
+    accounts = {
+        document["metadata"]["name"]
+        for document in rendered
+        if document["kind"] == "ServiceAccount"
+    }
+    container = _document(rendered, "Deployment")["spec"]["template"]["spec"]["containers"][0]
+    environment = {item["name"]: item.get("value") for item in container["env"]}
+
+    assert environment["STATIC_SETS_INSTALLER_SERVICE_ACCOUNT"] in accounts
+
+
+def test_the_installer_account_is_the_one_the_role_is_bound_to() -> None:
+    """Whatever the operator is told to use must carry the installer Role."""
+    rendered = render_chart()
+    container = _document(rendered, "Deployment")["spec"]["template"]["spec"]["containers"][0]
+    environment = {item["name"]: item.get("value") for item in container["env"]}
+    installer = environment["STATIC_SETS_INSTALLER_SERVICE_ACCOUNT"]
+    bindings = [
+        document
+        for document in rendered
+        if document["kind"] == "RoleBinding" and document["metadata"]["name"].endswith("-installer")
+    ]
+
+    assert len(bindings) == 1
+    subjects = bindings[0]["subjects"]
+    assert [subject["name"] for subject in subjects] == [installer]
+
+
+def test_chart_grants_the_namespace_read_kopf_needs() -> None:
+    """kopf manages a watch per namespace, so it reads them.
+
+    Without this rule the controller retries the lookup, fails, and restarts its
+    observer: the based-operators chart ships the same rule for the same reason.
+    """
+    rendered = render_chart()
+    roles = [
+        document
+        for document in rendered
+        if document["kind"] == "ClusterRole"
+        and any("namespaces" in rule.get("resources", []) for rule in document.get("rules", []))
+    ]
+
+    assert len(roles) == 1
+    rule = next(rule for rule in roles[0]["rules"] if "namespaces" in rule.get("resources", []))
+    assert set(rule["verbs"]) >= {"get", "list", "watch"}

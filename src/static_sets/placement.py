@@ -23,6 +23,7 @@ comfortably host the workload itself.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -70,6 +71,30 @@ STATIC_POD_MOUNT = "static-pod-path"
 
 BUNDLE_MOUNT = "bundle"
 """Volume name of the persistent bundle directory mount."""
+
+INSTALLER_SERVICE_ACCOUNT_ENV = "STATIC_SETS_INSTALLER_SERVICE_ACCOUNT"
+"""The environment variable the chart uses to name the installer ServiceAccount."""
+
+DEFAULT_INSTALLER_SERVICE_ACCOUNT = "static-sets-installer"
+"""The ServiceAccount name installers fall back to when the environment names none."""
+
+
+def installer_service_account() -> str:
+    """Return the ServiceAccount the installer and cleanup Pods run as.
+
+    A Pod that names a ServiceAccount which does not exist is refused at admission, so
+    the account has to be the one the deploying chart actually created. The chart
+    therefore passes its own resolved name through the environment — the account and
+    the Role behind it belong to the chart, and a renamed release or an overridden
+    ``installer.serviceAccountName`` has to carry over rather than be guessed. One
+    account serves every installer in the operator's namespace; an account per
+    StaticSet would need the operator to create ServiceAccounts, Roles and
+    RoleBindings, which is a privilege it does not ask for.
+
+    Returns:
+        The ServiceAccount name.
+    """
+    return os.environ.get(INSTALLER_SERVICE_ACCOUNT_ENV) or DEFAULT_INSTALLER_SERVICE_ACCOUNT
 
 
 @dataclass(frozen=True)
@@ -249,7 +274,7 @@ def _installer_pod_template(
         ANNOTATION_GENERATION: str(generation),
     }
     pod_spec: dict[str, Any] = {
-        "serviceAccountName": f"{static_set.metadata.name}-installer",
+        "serviceAccountName": installer_service_account(),
         "enableServiceLinks": False,
         "automountServiceAccountToken": True,
         "securityContext": {
