@@ -1,25 +1,120 @@
-# Based PyProject
+# StaticSets
 
-This repository is intended as a template for quickly setting up modern Python projects including dependency management, linting, docs generation, continuous integration and AI tooling.
+**Manage sets of static Pods from Kubernetes.**
 
-> Please replace this with your own documentation.
+A static Pod is a Pod a *node* owns rather than the cluster: kubelet reads a manifest
+from its own filesystem and starts it, so it keeps running — and comes back after a
+reboot — with the Kubernetes API unreachable. A `StaticSet` describes such a workload
+as an ordinary `PodTemplateSpec`, and this operator compiles it into a self-contained
+Pod, materializes the configuration it references on the node, writes it durably where
+kubelet looks, and keeps it in step as the template and its configuration change.
 
-## How to fork this repo as a template
+```yaml
+apiVersion: staticsets.cloudlane.dev/v1
+kind: StaticSet
+metadata:
+  name: web
+  namespace: static-sets
+spec:
+  mode: Deployment
+  replicas: 2
+  placement:
+    nodeSelector:
+      kubernetes.io/os: linux
+  template:
+    spec:
+      containers:
+        - name: web
+          image: registry.example.com/web:1.27
+          imagePullPolicy: IfNotPresent
+  installer:
+    image: ghcr.io/cloudlane-one/static-sets:0.1.0
+```
 
-> On GitHub, you can use this repo as a template for creating a new repository instead of forking via the default mechanism.
+The workload is never scheduled by Kubernetes. The operator creates *installer* Pods
+instead — a Deployment or a DaemonSet — and each installer writes the workload onto
+its own node.
 
-This repo is intended to get you up and running with a new Python project ASAP, so there are only a few places requiring manual changes after you created your fork:
+## What it does
 
-- `/docs`
-  - `.config.yml`: Change `site_name`, `repo_url` and `repo_name`
-  - `index.md`: Change title and contents
-  - `ref-python-api.md`: Change title to your *library name*
-- `/src`
-  - `based_pyproject`: rename folder to your *library name* (should be normalized version of your package name)
-- `/pyproject.toml`
-  - Change `project.name` to your *package name*
-  - Adapt `project.description`
-  - Change `tool.deptry.known_first_party` to contain only your *library name*
-  - *Optionally:* Uncomment `[tool.semantic_release.remote]` section if using ForgeJo / Gitea as primary host
-  - *Optionally:* [Import](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/managing-rulesets-for-a-repository#importing-a-ruleset) the main branch protection ruleset `/.github/rulesets/main.json` to your new repo if using GitHub
-- `/README.md` (this file): Change title and contents
+- **Compiles, never guesses.** Only a conservative subset of the Pod API is accepted.
+  A field that cannot be represented faithfully is *rejected*, never silently dropped,
+  because a static Pod that lost a field would start, look healthy, and behave
+  differently from the template it came from.
+- **Resolves configuration at install time.** ConfigMaps and Secrets are materialized
+  as revision-specific files on the node and mounted read-only, because a static Pod
+  cannot resolve a reference offline.
+- **Keeps Secret material out of the manifest.** Secret-to-file is supported;
+  Secret-to-environment is refused unless you explicitly opt into the disclosure.
+- **Installs durably.** Immutable revision directories, explicit file modes, `fsync`,
+  and atomic manifest replacement, so an interruption leaves either the old revision or
+  the new one and never a half-written file.
+- **Fences with an ownership protocol.** Placement identity is derived from the node,
+  so a replacement installer adopts its predecessor's placement; a stale installer
+  cannot delete a successor's workload.
+- **Separates installed state from observed health.** A placement can be installed and
+  unhealthy, or installed and unobservable, and status says which.
+
+## What it is not
+
+The guarantee is about the *manifest*, not the application. It depends on locally
+available images, a working runtime, networking, storage and the application's own
+dependencies, and it is not an exact replica guarantee during a partition. The
+[explanation page](https://cloudlane-one.github.io/static-sets/about-static-pods.html)
+is specific about where the promise ends, and the
+[deferred-features page](https://cloudlane-one.github.io/static-sets/ref-deferred-features.html)
+lists what this prototype does not implement yet.
+
+## Install
+
+```shell
+docker build -f deploy/Dockerfile -t ghcr.io/EXAMPLE/static-sets:0.1.0 .
+docker push ghcr.io/EXAMPLE/static-sets:0.1.0
+helm install static-sets ./deploy/helm/static-sets \
+  --namespace static-sets --create-namespace \
+  --set image.repository=ghcr.io/EXAMPLE/static-sets --set image.tag=0.1.0
+```
+
+Then follow [How to write a StaticSet](https://cloudlane-one.github.io/static-sets/how-to-write-a-static-set.html).
+Samples live in [`deploy/samples/`](./deploy/samples), and the test suite validates them.
+
+## Documentation
+
+Published at [cloudlane-one.github.io/static-sets](https://cloudlane-one.github.io/static-sets/).
+
+| Page | Why |
+| --- | --- |
+| [What a StaticSet guarantees](https://cloudlane-one.github.io/static-sets/about-static-pods.html) | The promise, its dependencies, and its limits. |
+| [Placement and capacity](https://cloudlane-one.github.io/static-sets/about-placement-and-capacity.html) | Which scheduler sees what, and the resource-accounting trade-off. |
+| [How to install](https://cloudlane-one.github.io/static-sets/how-to-install.html) | Prerequisites, chart, upgrades, rollback, uninstall. |
+| [`StaticSet` reference](https://cloudlane-one.github.io/static-sets/ref-staticset.html) | Every spec and status field. |
+| [Translation](https://cloudlane-one.github.io/static-sets/ref-translation.html) | The supported workload subset and every refusal. |
+| [Installation](https://cloudlane-one.github.io/static-sets/ref-installation.html) | The on-node layout, the ownership protocol and cleanup. |
+| [Disconnected reboot procedure](https://cloudlane-one.github.io/static-sets/how-to-verify-disconnected-reboot.html) | How to verify the reboot guarantee yourself. |
+| [Deferred features](https://cloudlane-one.github.io/static-sets/ref-deferred-features.html) | What is not implemented, and the known sharp edges. |
+
+## Development
+
+Built on the [based-operators](https://github.com/cloudlane-one/based-operators)
+framework: the custom resource is a Pydantic model, the CRD is generated from it, and
+the reconciliation logic is ordinary Python, with kopf as the runtime.
+
+```shell
+uv sync                    # install dependencies
+uv run pytest tests        # run the test suite
+uv run ruff check .        # lint
+uv run pyright .           # type-check
+uv run vtr build-docs      # build the documentation
+uv run app/render_crds.py  # regenerate the CRD in the chart
+```
+
+Two suites are opt-in because they need real infrastructure:
+
+```shell
+BASED_OPERATORS_IMAGE_SMOKE=1  uv run pytest tests/test_image_smoke.py -v   # needs docker
+STATIC_SETS_K8S_INTEGRATION=1  uv run pytest tests/test_e2e.py -v          # needs kind/docker/helm/kubectl
+```
+
+This project follows the conventions of the repository template it was bootstrapped
+from. See the [contribution guide](./docs/how-to-contribute.md) and the
+[local setup guide](./docs/how-to-setup-locally.md) to get started.
