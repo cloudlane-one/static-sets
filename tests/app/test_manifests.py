@@ -222,14 +222,41 @@ def test_the_image_builds_the_project_and_runs_the_entry_point() -> None:
 
 
 def test_every_dockerfile_references_an_existing_entry_point() -> None:
-    """A COPY path or a command that names a missing file would break the build."""
+    """Every source an image build copies exists in the repository.
+
+    The builder stage installs the whole context into ``/app``, so a later stage that
+    copies ``/app/<path>`` out of it is copying ``<path>`` out of the repository.
+    """
     for line in DOCKERFILE.read_text(encoding="utf-8").splitlines():
         if line.startswith("COPY "):
-            assert line.split()[1] == "."
-        if line.startswith("ENTRYPOINT") or line.startswith("CMD"):
+            tokens = [token for token in line.split()[1:] if not token.startswith("--")]
+            source = tokens[0]
+            if source == ".":
+                assert (REPO_ROOT / "pyproject.toml").is_file()
+            elif source.startswith("/app/"):
+                assert (REPO_ROOT / source.removeprefix("/app/")).exists(), source
+            elif not source.startswith("/"):
+                assert (REPO_ROOT / source).exists(), source
+        if line.startswith(("CMD", "ENTRYPOINT")):
             for token in line.split():
                 if token.startswith("app/"):
                     assert (REPO_ROOT / token.strip('",')).is_file()
+
+
+def test_the_shipped_image_carries_no_build_tooling() -> None:
+    """git and a compiler stay in the builder stage, out of the node-facing image.
+
+    An installer Pod runs as root with the manifest directory mounted, so tooling that
+    is only needed to fetch a Git-referenced dependency must not survive into it.
+    """
+    content = DOCKERFILE.read_text(encoding="utf-8")
+    final_stage = content.rsplit("\nFROM ", 1)[1]
+
+    assert "apt-get" not in final_stage
+    assert all(
+        "--from=builder" in line for line in final_stage.splitlines() if line.startswith("COPY ")
+    )
+    assert ".git/" in (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
 
 
 def test_dockerignore_excludes_build_output() -> None:
