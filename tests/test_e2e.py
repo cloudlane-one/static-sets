@@ -448,8 +448,12 @@ def deployed() -> Iterator[dict[str, Any]]:
 
 
 @requires_image_tooling
-def test_the_crd_is_established() -> None:
-    """The CRD the chart installs is accepted by the API server."""
+def test_the_crd_is_established(deployed: dict[str, Any]) -> None:
+    """The CRD the chart installs is accepted by the API server.
+
+    Takes ``deployed`` for its side effect: that fixture applies the CRD, and this
+    test is meaningless before it has.
+    """
     payload = _json("get", "crd", CRD_NAME)
 
     conditions = (payload or {}).get("status", {}).get("conditions", [])

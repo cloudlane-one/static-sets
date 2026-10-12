@@ -63,17 +63,18 @@ def image() -> Iterator[str]:
         _run("docker", "rmi", "-f", reference, check=False)
 
 
-def _inside(image: str, *args: str) -> subprocess.CompletedProcess[str]:
+def _inside(image: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a command inside the image.
 
     Args:
         image: The image reference.
         *args: The command to run.
+        check: Whether a non-zero exit should raise.
 
     Returns:
         The completed process.
     """
-    return _run("docker", "run", "--rm", image, *args)
+    return _run("docker", "run", "--rm", image, *args, check=check)
 
 
 def test_the_library_is_installed(image: str) -> None:
@@ -108,12 +109,13 @@ def test_the_entry_point_and_the_installer_module_both_run(image: str) -> None:
     controller = _inside(
         image, "python", "-c", "import runpy; runpy.run_path('app/static_sets_operator.py')"
     )
-    installer = _inside(image, "static-set-installer", "reconcile")
+    installer = _inside(image, "static-set-installer", "reconcile", check=False)
 
     assert controller.returncode == 0, controller.stderr
     # No cluster and no environment: the installer must fail cleanly, not hang or
     # traceback into an unknown state.
     assert installer.returncode == 2, installer.stdout + installer.stderr
+    assert "invalid-environment" in installer.stdout
 
 
 def test_the_crd_is_rendered_from_the_installed_library(image: str) -> None:
@@ -129,17 +131,7 @@ def test_the_crd_is_rendered_from_the_installed_library(image: str) -> None:
     assert result.stdout.strip() == "staticsets.staticsets.cloudlane.dev"
 
 
-def test_the_crd_in_the_chart_matches_the_installed_library(image: str) -> None:
-    """Re-rendering inside the image reproduces the committed CRD exactly."""
-    result = _inside(
-        image,
-        "python",
-        "-c",
-        "from pathlib import Path; from based_operators import crd_yaml;"
-        "from static_sets.models import StaticSet;"
-        "print(crd_yaml(StaticSet) == Path("
-        "'deploy/helm/static-sets/crds/staticsets.staticsets.cloudlane.dev.yaml'"
-        ").read_text())",
-    )
-
-    assert result.stdout.strip() == "True"
+# The committed CRD is compared against the models the installed library renders by
+# tests/app/test_manifests.py, which runs against the same wheel in the project's
+# virtual environment. The image deliberately does not carry the chart, so that check
+# stays where the chart is.
