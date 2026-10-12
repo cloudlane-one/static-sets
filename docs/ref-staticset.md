@@ -83,7 +83,7 @@ it.
 | --- | --- | --- |
 | `image` | — required | The installer image. Not the target application. |
 | `imagePullPolicy` | `IfNotPresent` | Pull policy for the installer container. |
-| `staticPodPath` | `/etc/kubernetes/manifests` | kubelet's `staticPodPath`. Must match the node's kubelet configuration; the operator never edits kubelet configuration. |
+| `staticPodPath` | `/etc/kubernetes/manifests` | kubelet's `staticPodPath`. Must match the node's kubelet configuration; the operator never edits kubelet configuration. The directory must already exist on the node: the installer mounts it as a `Directory`, not a `DirectoryOrCreate`, so a path kubelet cannot be watching fails loudly at mount time instead of being invented. |
 | `bundleDir` | `/var/lib/static-sets` | The persistent directory the installer owns. Must be disjoint from `staticPodPath`, because kubelet watches that directory and would try to start a temporary file. |
 | `resources` | unset | Overrides the installer's small fixed reservation. See [capacity](./about-placement-and-capacity.md#resource-accounting-is-a-deliberate-trade-off). |
 

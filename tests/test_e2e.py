@@ -356,6 +356,60 @@ def _make_image_visible(image: str) -> None:
         _run("minikube", "image", "load", image)
 
 
+def prepare_static_pod_directory(namespace: str) -> None:
+    """Create the static Pod directory on the node that will host an installer.
+
+    The installer mounts the configured path as a ``Directory``, not a
+    ``DirectoryOrCreate``: a path kubelet cannot be watching should fail loudly at
+    mount time rather than be invented. Creating it is therefore the administrator's
+    job, and the suite does what an administrator would — on the single node a kind
+    cluster has.
+
+    Args:
+        namespace: The namespace to run the preparation Pod in.
+
+    Raises:
+        AssertionError: If the directory could not be created.
+    """
+    node = _kubectl("get", "nodes", "-o", "jsonpath={.items[0].metadata.name}").stdout.strip()
+    name = "prepare-static-pod-path"
+    _apply(
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": {
+                "nodeName": node,
+                "restartPolicy": "Never",
+                "containers": [
+                    {
+                        "name": "prepare",
+                        "image": "busybox:1.36",
+                        "command": [
+                            "sh",
+                            "-c",
+                            f"mkdir -p /host{STATIC_POD_PATH} && chmod 0700 /host{STATIC_POD_PATH}",
+                        ],
+                        "volumeMounts": [{"name": "host-root", "mountPath": "/host"}],
+                    }
+                ],
+                "volumes": [{"name": "host-root", "hostPath": {"path": "/"}}],
+            },
+        }
+    )
+
+    def finished() -> bool:
+        payload = _json("get", "pod", name, "-n", namespace)
+        return (payload or {}).get("status", {}).get("phase") in {"Succeeded", "Failed"}
+
+    try:
+        _wait_for("the node preparation Pod to finish", finished, timeout=240)
+        payload = _json("get", "pod", name, "-n", namespace) or {}
+        assert payload.get("status", {}).get("phase") == "Succeeded", payload
+    finally:
+        _kubectl("delete", "pod", name, "-n", namespace, check=False)
+
+
 def static_set_body(image: str, name: str, namespace: str, **overrides: Any) -> dict[str, Any]:
     """Return a StaticSet that exercises the workload translator.
 
@@ -439,6 +493,10 @@ def deployed() -> Iterator[dict[str, Any]]:
     )
     try:
         _kubectl("rollout", "status", f"deployment/{release}", "-n", namespace, "--timeout=300s")
+        # The installer mounts the static Pod path as a Directory, so the directory
+        # kubelet would be watching has to exist first — this is the administrator's
+        # step, performed here the way an administrator would.
+        prepare_static_pod_directory(namespace)
         yield {"namespace": namespace, "release": release, "image": image}
     finally:
         _run("helm", "uninstall", release, "--namespace", namespace, check=False)
