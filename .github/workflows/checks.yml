@@ -18,8 +18,16 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v10.0.1
 
+      # Pinned to the interpreter the operator image uses, so CI and the shipped
+      # image agree about the runtime.
       - name: Install dependencies
-        run: uv sync --group ci
+        run: uv sync --python 3.13 --group ci
+
+      # The suite renders the Helm chart (tests/app/test_manifests.py). Helm has to
+      # be present, and that test is written to FAIL rather than skip when it is
+      # missing in CI, so a runner that loses it cannot pass vacuously.
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
 
       - name: Run Ruff
         run: uv run ruff check .
@@ -27,8 +35,12 @@ jobs:
       - name: Run Pyright
         run: uv run pyright .
 
+      # The library and the entry points must stay above the 90 % bar the
+      # contribution guide sets.
       - name: Run Pytest
-        run: uv run pytest tests
+        run: >-
+          uv run pytest tests
+          --cov=src --cov=app --cov-report=term-missing --cov-fail-under=90
 
       - name: Check if docs build successfully
         run: uv run vtr build-docs
@@ -41,3 +53,55 @@ jobs:
 
       - name: Check unused undeclared deps
         run: uv run vtr assert-no-deptry-issues
+
+  image-smoke:
+    name: Image smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Install dependencies
+        run: uv sync --python 3.13 --group ci
+
+      # Builds deploy/Dockerfile and checks that both entry points run inside it,
+      # that the console script installer Pods invoke is on PATH, and that the CRD
+      # still renders identically from the installed library.
+      - name: Build and smoke-test the operator image
+        env:
+          STATIC_SETS_IMAGE_SMOKE: "1"
+        run: uv run pytest tests/test_image_smoke.py -v
+
+  end-to-end:
+    name: End-to-end on a kind cluster
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Install dependencies
+        run: uv sync --python 3.13 --group ci
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      # A throwaway cluster. The suite installs the chart, creates a StaticSet,
+      # checks the static Pod manifest the installer wrote on the node, and deletes
+      # the StaticSet again to exercise the cleanup protocol.
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          node_image: kindest/node:v1.31.14
+
+      - name: Run the end-to-end suite
+        env:
+          STATIC_SETS_K8S_INTEGRATION: "1"
+        run: uv run pytest tests/test_e2e.py -v

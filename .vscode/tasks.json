@@ -53,6 +53,34 @@
       "problemMatcher": []
     },
     {
+      "label": "assert-coverage",
+      "detail": "Assert: Test coverage bar over the library and the entry points",
+      "type": "shell",
+      "command": "uv run pytest tests --cov=src --cov=app --cov-report=term-missing --cov-fail-under=90",
+      "problemMatcher": []
+    },
+    {
+      "label": "assert-chart",
+      "detail": "Assert: Lint the Helm chart and render it in both webhook modes",
+      "type": "shell",
+      "command": "helm lint deploy/helm/static-sets && helm template static-sets deploy/helm/static-sets -n static-sets > /dev/null && helm template static-sets deploy/helm/static-sets -n static-sets --set webhook.enabled=true > /dev/null",
+      "problemMatcher": []
+    },
+    {
+      "label": "build-crds",
+      "detail": "Build: Regenerate the CustomResourceDefinition in the Helm chart",
+      "type": "shell",
+      "command": "uv run app/render_crds.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "build-image",
+      "detail": "Build: Build the operator image from deploy/Dockerfile",
+      "type": "shell",
+      "command": "docker build -f deploy/Dockerfile -t static-sets:dev .",
+      "problemMatcher": []
+    },
+    {
       "label": "serve-docs-dev",
       "detail": "Serve: Docs pages in development mode with auto-reload",
       "type": "shell",

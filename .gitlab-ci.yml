@@ -1,5 +1,5 @@
 # GitLab CI equivalent of the GitHub Actions workflows in .github/workflows/
-# - checks.yml  -> `checks` job (lint, type-check, test, docs build, dependency checks)
+# - checks.yml  -> `checks`, `image-smoke` and `end-to-end` jobs
 # - release.yml -> `release` job (semantic-release version + PyPI dist build/publish)
 # - pages.yml   -> `pages` job (docs deployment via GitLab Pages instead of `gh-deploy`)
 
@@ -34,15 +34,42 @@ variables:
 
 checks:
   stage: check
+  before_script:
+    # Helm is needed by tests/app/test_manifests.py, which renders the chart.
+    - apt-get update && apt-get install -y --no-install-recommends curl
+    - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
   script:
-    - uv sync --group ci
+    - uv sync --python 3.13 --group ci
     - uv run ruff check .
     - uv run pyright .
-    - uv run pytest tests
+    # The library and the entry points must stay above the 90 % bar.
+    - uv run pytest tests --cov=src --cov=app --cov-report=term-missing --cov-fail-under=90
     - uv run vtr build-docs
     - uv run vtr assert-license-compliance
     - uv run vtr assert-no-vulnerabilities
     - uv run vtr assert-no-deptry-issues
+
+image-smoke:
+  stage: check
+  # Builds deploy/Dockerfile and runs both entry points inside it. Needs a runner
+  # with a Docker daemon available to the job.
+  script:
+    - uv sync --python 3.13 --group ci
+    - STATIC_SETS_IMAGE_SMOKE=1 uv run pytest tests/test_image_smoke.py -v
+
+end-to-end:
+  stage: check
+  # Needs a cluster. On a runner with a Docker daemon, create a throwaway kind
+  # cluster first (the GitHub pipeline does this with helm/kind-action):
+  #
+  #   kind create cluster --image kindest/node:v1.31.14
+  #
+  # then set STATIC_SETS_K8S_INTEGRATION and run the suite.
+  rules:
+    - if: $STATIC_SETS_K8S_INTEGRATION == "1"
+  script:
+    - uv sync --python 3.13 --group ci
+    - uv run pytest tests/test_e2e.py -v
 
 release:
   stage: release
