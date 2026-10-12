@@ -1,0 +1,200 @@
+{{- if .Values.rbac.create }}
+{{- $fullname := include "static-sets.fullname" . }}
+{{- $namespace := include "static-sets.watchNamespace" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "static-sets.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+---
+# The installer identity. Installer Pods run as this account, in the namespace the
+# operator watches, and it is deliberately narrower than the controller's: it may
+# read the StaticSet it serves, read the configuration that StaticSet references,
+# write its own acknowledgment, and release its own finalizer.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "static-sets.installerServiceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-installer
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["staticsets.cloudlane.dev"]
+    resources: [staticsets]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, create, update, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list]
+  # An installer holds a finalizer while it owns local state and clears it when it
+  # is done; a cleanup worker deletes itself the same way. That is the only reason
+  # this account may touch Pods at all.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, patch, delete]
+  # Progress and refusals are reported as events.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-installer
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-installer
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "static-sets.installerServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-controller
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["staticsets.cloudlane.dev"]
+    resources: [staticsets, staticsets/status, staticsets/finalizers]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # The installer workload the operator owns.
+  - apiGroups: ["apps"]
+    resources: [deployments, daemonsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Installer Pods and the cleanup workers that replace them, the placement
+  # objects installers acknowledge through, and mirror-Pod observation.
+  - apiGroups: [""]
+    resources: [pods, configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Reading referenced configuration is the operator's job only in the sense that
+  # it may need to report what it could not read; it never copies Secret data.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-controller
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "static-sets.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# kopf manages one watch per namespace and starts and stops them as namespaces appear
+# and disappear, so it has to be able to read them. This is the framework's own
+# requirement — it is the same rule the based-operators chart ships — and it is the
+# reason the operator is not purely namespaced.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-namespace-reader
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-namespace-reader
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-namespace-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "static-sets.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Nodes are cluster-scoped too: placement and reachability reporting need this read,
+# and nothing else about a node.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-node-reader
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-node-reader
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "static-sets.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.webhook.enabled }}
+---
+# kopf creates and keeps the webhook configurations in sync itself; they are
+# cluster-scoped, which is the only reason this exists.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-webhook
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations]
+    verbs: [get, list, watch, create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-webhook
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-webhook
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "static-sets.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

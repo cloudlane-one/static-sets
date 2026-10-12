@@ -1,0 +1,71 @@
+# Defaults of the StaticSet operator chart.
+#
+# The operator runs in one namespace and manages StaticSets in that same
+# namespace, so every permission it needs is namespaced. The only cluster-scoped
+# access it asks for is reading Nodes, which is what placement and reachability
+# reporting need.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/cloudlane-one/static-sets
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# The namespace the operator watches. Defaults to the release namespace.
+# StaticSets must live in this namespace, because that is where the installer
+# Pods the operator creates, and the resources they acknowledge through, live.
+watchNamespace: ""
+
+# Strict admission validation of StaticSets.
+#
+# The generated CRD is a structural schema, so the API server *prunes* an unknown
+# field instead of refusing it. Turning the webhook on makes such an object a
+# rejection instead of a silent drop. It needs cert-manager to issue the serving
+# certificate, so it is off by default; with it off, unknown template fields are
+# pruned silently by the API server.
+webhook:
+  enabled: false
+  port: 8443
+  failurePolicy: Fail
+  certManager:
+    createIssuer: true
+    issuerRef:
+      name: ""
+      kind: Issuer
+
+# The ServiceAccount the installer Pods run as. Defaults to
+# <fullname>-installer; it is the identity that writes static Pod manifests and
+# materialized configuration on a node.
+installer:
+  serviceAccountName: ""
+
+rbac:
+  create: true
+
+podLabels: {}
+podAnnotations: {}
+
+# The operator only ever reconciles through the API; it mounts no host path and
+# needs no privilege.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+podSecurityContext: {}
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

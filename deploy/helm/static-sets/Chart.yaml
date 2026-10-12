@@ -1,0 +1,15 @@
+apiVersion: v2
+name: static-sets
+description: Manage sets of static Pods with the StaticSet operator.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/cloudlane-one/static-sets
+sources:
+  - https://github.com/cloudlane-one/static-sets
+keywords:
+  - kubernetes
+  - operator
+  - static-pods
+  - edge

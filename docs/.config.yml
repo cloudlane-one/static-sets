@@ -1,8 +1,8 @@
-site_name: Based PyProject
+site_name: StaticSets
 docs_dir: .
 site_url: !ENV SITE_URL
-repo_url: "https://github.com/cloudlane-one/based-pyproject"
-repo_name: "cloudlane-one/based-pyproject"
+repo_url: "https://github.com/cloudlane-one/static-sets"
+repo_name: "cloudlane-one/static-sets"
 edit_uri: "-/edit/main/docs/"
 site_dir: ../dist/docs
 use_directory_urls: false
@@ -10,13 +10,24 @@ dev_addr: 127.0.0.1:9000
 
 nav:
   - Home: index.md
+  - Explanation:
+      - about-static-pods.md
+      - about-placement-and-capacity.md
+  - Guides:
+      - how-to-install.md
+      - how-to-write-a-static-set.md
+      - how-to-verify-disconnected-reboot.md
+  - Reference:
+      - ref-staticset.md
+      - ref-translation.md
+      - ref-installation.md
+      - ref-deferred-features.md
+      - Python API: ref-python-api.md
   - Development:
       - how-to-contribute.md
       - how-to-setup-locally.md
       - how-to-add-dependencies.md
       - how-to-check-quality.md
-  - Reference:
-      - Python API: ref-python-api.md
       - ref-directory-structure.md
       - ref-code-conventions-tooling.md
 
@@ -27,8 +38,6 @@ validation:
 
 theme:
   name: material
-  logo: img/logo-kit-white.png
-  favicon: img/favicon.ico
   features:
     - announce.dismiss
     - content.action.edit
@@ -67,9 +76,6 @@ theme:
 
 extra_css:
   - css/mkdocstrings.css
-
-extra_javascript:
-  - https://unpkg.com/mermaid@10.9.0/dist/mermaid.min.js
 
 markdown_extensions:
   - abbr
@@ -116,7 +122,7 @@ plugins:
       default_handler: python
       handlers:
         python:
-          paths: [../src]
+          paths: [../src, ../app]
           inventories:
             - https://docs.python.org/3/objects.inv
             - https://pydantic.dev/docs/validation/latest/objects.inv

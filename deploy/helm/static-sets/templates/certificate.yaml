@@ -1,0 +1,38 @@
+{{- if .Values.webhook.enabled }}
+{{- if .Values.webhook.certManager.createIssuer }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "static-sets.fullname" . }}-selfsigned
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "static-sets.fullname" . }}-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "static-sets.webhookSecretName" . }}
+  duration: 8760h
+  renewBefore: 720h
+  # The API server dials the Service by its in-cluster DNS name, so that is the
+  # name the certificate has to carry.
+  dnsNames:
+    - {{ printf "%s.%s.svc" (include "static-sets.fullname" .) .Release.Namespace | quote }}
+    - {{ printf "%s.%s.svc.cluster.local" (include "static-sets.fullname" .) .Release.Namespace | quote }}
+  issuerRef:
+    {{- if .Values.webhook.certManager.createIssuer }}
+    name: {{ include "static-sets.fullname" . }}-selfsigned
+    kind: Issuer
+    {{- else }}
+    name: {{ .Values.webhook.certManager.issuerRef.name }}
+    kind: {{ .Values.webhook.certManager.issuerRef.kind }}
+    {{- end }}
+{{- end }}

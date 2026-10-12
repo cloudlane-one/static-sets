@@ -1,0 +1,19 @@
+.venv/
+# Excluded on purpose: the image states its version through
+# UV_DYNAMIC_VERSIONING_BYPASS rather than reading it from version control, so the
+# build neither needs the history nor ships it inside a privileged-on-a-node image.
+.git/
+build/
+dist/
+wheels/
+*.egg-info/
+__pycache__/
+*.py[oc]
+.ipynb_checkpoints/
+.coverage
+SBOM.json
+.env
+data/
+.uv-cache/
+.cache/
+docs/img/*.png

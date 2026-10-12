@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "static-sets.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+spec:
+  # Two controllers reconciling the same objects collide, so there is exactly one
+  # replica and it is replaced rather than rolled over during an upgrade.
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "static-sets.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "static-sets.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "static-sets.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The command names the entry point explicitly rather than relying on the
+          # image default, so the chart is the one place that decides whether the
+          # admission webhook is served.
+          command:
+            - kopf
+            - run
+            - app/static_sets_operator.py
+            - --namespace={{ include "static-sets.watchNamespace" . }}
+            {{- if .Values.webhook.enabled }}
+            - -m
+            - based_operators.webhook
+            {{- end }}
+            - --liveness=http://0.0.0.0:8080/healthz
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+            {{- if .Values.webhook.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.webhook.port }}
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: STATIC_SETS_WEBHOOK
+              value: {{ ternary "1" "0" .Values.webhook.enabled | quote }}
+            # The installer workload and the cleanup workers run as this account. The
+            # chart owns the account, so it tells the operator which name it created
+            # rather than letting the operator invent one admission would refuse.
+            - name: STATIC_SETS_INSTALLER_SERVICE_ACCOUNT
+              value: {{ include "static-sets.installerServiceAccountName" . | quote }}
+            {{- if .Values.webhook.enabled }}
+            - name: WEBHOOK_CERT_DIR
+              value: /etc/webhook/certs
+            - name: WEBHOOK_PORT
+              value: {{ .Values.webhook.port | quote }}
+            - name: WEBHOOK_HOST
+              value: {{ printf "%s.%s.svc" (include "static-sets.fullname" .) .Release.Namespace | quote }}
+            - name: WEBHOOK_MANAGED
+              value: {{ include "static-sets.webhookManagedName" . | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- if .Values.webhook.enabled }}
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.webhook.enabled }}
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: {{ include "static-sets.webhookSecretName" . }}
+            defaultMode: 0400
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

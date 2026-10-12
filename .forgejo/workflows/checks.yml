@@ -21,7 +21,14 @@ jobs:
         uses: https://github.com/astral-sh/setup-uv@v10.0.1
 
       - name: Install dependencies
-        run: uv sync --group ci
+        run: uv sync --python 3.13 --group ci
+
+      # tests/app/test_manifests.py renders the Helm chart with `helm template`, and
+      # it fails rather than skips when helm is missing in CI. There is no Forgejo
+      # equivalent of azure/setup-helm, so the official installer script is used.
+      - name: Setup Helm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
       - name: Run Ruff
         run: uv run ruff check .
@@ -29,8 +36,12 @@ jobs:
       - name: Run Pyright
         run: uv run pyright .
 
+      # The library and the entry points must stay above the 90 % bar the
+      # contribution guide sets.
       - name: Run Pytest
-        run: uv run pytest tests
+        run: >-
+          uv run pytest tests
+          --cov=src --cov=app --cov-report=term-missing --cov-fail-under=90
 
       - name: Check if docs build successfully
         run: uv run vtr build-docs
@@ -43,3 +54,22 @@ jobs:
 
       - name: Check unused undeclared deps
         run: uv run vtr assert-no-deptry-issues
+
+  image-smoke:
+    name: Image smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v7.0.1
+
+      - name: Setup uv
+        uses: https://github.com/astral-sh/setup-uv@v10.0.1
+
+      - name: Install dependencies
+        run: uv sync --python 3.13 --group ci
+
+      - name: Build and smoke-test the operator image
+        env:
+          STATIC_SETS_IMAGE_SMOKE: "1"
+        run: uv run pytest tests/test_image_smoke.py -v
