@@ -163,3 +163,138 @@ def test_definition_error_is_a_library_error() -> None:
     from static_sets.errors import StaticSetsError
 
     assert issubclass(DefinitionError, StaticSetsError)
+
+
+def _placement_error(body: dict[str, Any]) -> str:
+    """Validate a resource and return the placement error it raised.
+
+    Args:
+        body: The wire-shaped resource.
+
+    Returns:
+        The validation message.
+    """
+    with pytest.raises(ValidationError) as error:
+        StaticSet.model_validate(body)
+    return str(error.value)
+
+
+def test_placement_refuses_pod_affinity(make_resource: Any) -> None:
+    """Pod affinity is refused instead of accepted and then ignored by the planner."""
+    body = make_resource(
+        spec={
+            "placement": {
+                "affinity": {
+                    "podAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": [
+                            {"topologyKey": "zone", "labelSelector": {"matchLabels": {"a": "b"}}}
+                        ]
+                    }
+                }
+            }
+        }
+    )
+
+    message = _placement_error(body)
+
+    assert "podAffinity" in message
+    assert "not supported" in message
+
+
+def test_placement_refuses_an_unknown_node_selector_operator(make_resource: Any) -> None:
+    """The planner can only evaluate the documented node-selector operators."""
+    body = make_resource(
+        spec={
+            "placement": {
+                "affinity": {
+                    "nodeAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [
+                                {"matchExpressions": [{"key": "zone", "operator": "Near"}]}
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+    message = _placement_error(body)
+
+    assert "'Near'" in message
+    assert "not supported" in message
+
+
+def test_placement_refuses_an_unknown_toleration_effect(make_resource: Any) -> None:
+    """A toleration effect is checked against the API server's set."""
+    body = make_resource(spec={"placement": {"tolerations": [{"key": "k", "effect": "Maybe"}]}})
+
+    message = _placement_error(body)
+
+    assert "'Maybe'" in message
+    assert "NoSchedule" in message
+
+
+def test_placement_refuses_an_out_of_range_weight(make_resource: Any) -> None:
+    """A preferred term's weight must be 1-100, which the official type does not check."""
+    body = make_resource(
+        spec={
+            "placement": {
+                "affinity": {
+                    "nodeAffinity": {
+                        "preferredDuringSchedulingIgnoredDuringExecution": [
+                            {"weight": 0, "preference": {"matchExpressions": []}}
+                        ]
+                    }
+                }
+            }
+        }
+    )
+
+    assert "1-100" in _placement_error(body)
+
+
+def test_placement_constrains_topology_spread_fields(make_resource: Any) -> None:
+    """The skew and key are constrained, and the spread policy defaults as before."""
+    invalid = make_resource(
+        spec={
+            "placement": {
+                "topologySpreadConstraints": [
+                    {"maxSkew": 0, "topologyKey": "zone", "whenUnsatisfiable": "DoNotSchedule"}
+                ]
+            }
+        }
+    )
+
+    assert "greater than or equal to 1" in _placement_error(invalid)
+
+    valid = StaticSet.model_validate(
+        make_resource(
+            spec={
+                "placement": {"topologySpreadConstraints": [{"maxSkew": 1, "topologyKey": "zone"}]}
+            }
+        )
+    )
+
+    constraints = valid.spec.placement.topology_spread_constraints or []
+    assert constraints[0].when_unsatisfiable == "DoNotSchedule"
+
+
+def test_placement_refuses_an_unknown_label_selector_operator(make_resource: Any) -> None:
+    """A topology spread selector's operator is checked against the API server's set."""
+    body = make_resource(
+        spec={
+            "placement": {
+                "topologySpreadConstraints": [
+                    {
+                        "maxSkew": 1,
+                        "topologyKey": "zone",
+                        "whenUnsatisfiable": "DoNotSchedule",
+                        "labelSelector": {"matchExpressions": [{"key": "app", "operator": "Like"}]},
+                    }
+                ]
+            }
+        }
+    )
+
+    assert "'Like'" in _placement_error(body)

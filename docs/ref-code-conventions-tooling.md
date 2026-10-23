@@ -20,7 +20,18 @@
 - `properdocs` is used for docs generation
   - config in `/docs/.config.yml`
   - `mkdosctring.python` for API docs
+  - `mkdocs-typer2` renders the command reference from the Typer applications, so a
+    page never hand-copies an option list
   - `properdocs` = maintained `mkdocs` successor
+- Command-line entry points are [Typer](https://typer.tiangolo.com/) applications.
+  The command declaration is the single source of truth for parsing, `--help` and the
+  generated reference page.
+- Kubernetes API access goes through the official `kubernetes` client, whose
+  generated models are pydantic models. Built-in objects are read and written as
+  those models, and the scheduler-placement types in `spec.placement` are the
+  generated models themselves; the operator's own models describe only the
+  StaticSet API, because a static Pod template is deliberately narrower and
+  stricter than `V1Pod`.
 - CI pipelines for both GitHub (`/.github/workflows`) and GitLab (`/.gitlab-ci.yml`) exist
   - Checks are run on every push to main or every pull request event, involving most of aforementioned tooling
   - [Semantic-release](https://python-semantic-release.readthedocs.io/en/latest/index.html) is run on every push to main, leveraging [Gitmoji](https://gitmoji.dev/) semantics to determine version numbers

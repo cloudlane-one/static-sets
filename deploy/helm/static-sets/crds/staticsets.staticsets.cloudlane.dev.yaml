@@ -285,16 +285,71 @@ spec:
                               type: array
                               nullable: true
                             resources:
-                              description: Container resource requests and limits,
-                                passed through unchanged.
+                              description: 'Container resource requests and limits,
+                                from the official Kubernetes type.
+
+
+                                ``claims`` belongs to the scheduler, which never sees
+                                a static Pod: kubelet
+
+                                starts it from a file and cannot resolve a claim.
+                                It is refused rather than
+
+                                written into a manifest that would silently never
+                                take effect.'
                               properties:
+                                claims:
+                                  description: Claims lists the names of resources,
+                                    defined in spec.resourceClaims, that are used
+                                    by this container.  This field depends on the
+                                    DynamicResourceAllocation feature gate.  This
+                                    field is immutable. It can only be set for containers.
+                                  title: Claims
+                                  items:
+                                    description: "ResourceClaim references one entry\
+                                      \ in PodSpec.ResourceClaims.\n\nAttributes:\n\
+                                      \  openapi_types (dict): The key is attribute\
+                                      \ name\n                        and the value\
+                                      \ is attribute type.\n  attribute_map (dict):\
+                                      \ The key is attribute name\n              \
+                                      \          and the value is json key in definition."
+                                    properties:
+                                      name:
+                                        description: Name must match the name of one
+                                          entry in pod.spec.resourceClaims of the
+                                          Pod where this field is used. It makes that
+                                          resource available inside a container.
+                                        title: Name
+                                        type: string
+                                      request:
+                                        description: Request is the name chosen for
+                                          a request in the referenced claim. If empty,
+                                          everything from the claim is made available,
+                                          otherwise only the result of this request.
+                                        title: Request
+                                        type: string
+                                        nullable: true
+                                    required: &id011
+                                    - name
+                                    title: CoreV1ResourceClaim
+                                    type: object
+                                  type: array
+                                  nullable: true
                                 limits:
+                                  description: 'Limits describes the maximum amount
+                                    of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                                   title: Limits
                                   additionalProperties:
                                     type: string
                                   type: object
                                   nullable: true
                                 requests:
+                                  description: 'Requests describes the minimum amount
+                                    of compute resources required. If Requests is
+                                    omitted for a container, it defaults to Limits
+                                    if that is explicitly specified, otherwise to
+                                    an implementation-defined value. Requests cannot
+                                    exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                                   title: Requests
                                   additionalProperties:
                                     type: string
@@ -337,7 +392,7 @@ spec:
                                     title: Recursivereadonly
                                     type: string
                                     nullable: true
-                                required: &id011
+                                required: &id012
                                 - name
                                 - mountPath
                                 title: VolumeMount
@@ -748,7 +803,7 @@ spec:
                                       title: Localhostprofile
                                       type: string
                                       nullable: true
-                                  required: &id012
+                                  required: &id013
                                   - type
                                   title: SeccompProfile
                                   type: object
@@ -768,7 +823,7 @@ spec:
                               title: Tty
                               type: boolean
                               nullable: true
-                          required: &id013
+                          required: &id014
                           - name
                           - image
                           title: Container
@@ -985,16 +1040,70 @@ spec:
                               type: array
                               nullable: true
                             resources:
-                              description: Container resource requests and limits,
-                                passed through unchanged.
+                              description: 'Container resource requests and limits,
+                                from the official Kubernetes type.
+
+
+                                ``claims`` belongs to the scheduler, which never sees
+                                a static Pod: kubelet
+
+                                starts it from a file and cannot resolve a claim.
+                                It is refused rather than
+
+                                written into a manifest that would silently never
+                                take effect.'
                               properties:
+                                claims:
+                                  description: Claims lists the names of resources,
+                                    defined in spec.resourceClaims, that are used
+                                    by this container.  This field depends on the
+                                    DynamicResourceAllocation feature gate.  This
+                                    field is immutable. It can only be set for containers.
+                                  title: Claims
+                                  items:
+                                    description: "ResourceClaim references one entry\
+                                      \ in PodSpec.ResourceClaims.\n\nAttributes:\n\
+                                      \  openapi_types (dict): The key is attribute\
+                                      \ name\n                        and the value\
+                                      \ is attribute type.\n  attribute_map (dict):\
+                                      \ The key is attribute name\n              \
+                                      \          and the value is json key in definition."
+                                    properties:
+                                      name:
+                                        description: Name must match the name of one
+                                          entry in pod.spec.resourceClaims of the
+                                          Pod where this field is used. It makes that
+                                          resource available inside a container.
+                                        title: Name
+                                        type: string
+                                      request:
+                                        description: Request is the name chosen for
+                                          a request in the referenced claim. If empty,
+                                          everything from the claim is made available,
+                                          otherwise only the result of this request.
+                                        title: Request
+                                        type: string
+                                        nullable: true
+                                    required: *id011
+                                    title: CoreV1ResourceClaim
+                                    type: object
+                                  type: array
+                                  nullable: true
                                 limits:
+                                  description: 'Limits describes the maximum amount
+                                    of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                                   title: Limits
                                   additionalProperties:
                                     type: string
                                   type: object
                                   nullable: true
                                 requests:
+                                  description: 'Requests describes the minimum amount
+                                    of compute resources required. If Requests is
+                                    omitted for a container, it defaults to Limits
+                                    if that is explicitly specified, otherwise to
+                                    an implementation-defined value. Requests cannot
+                                    exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                                   title: Requests
                                   additionalProperties:
                                     type: string
@@ -1037,7 +1146,7 @@ spec:
                                     title: Recursivereadonly
                                     type: string
                                     nullable: true
-                                required: *id011
+                                required: *id012
                                 title: VolumeMount
                                 type: object
                               type: array
@@ -1442,7 +1551,7 @@ spec:
                                       title: Localhostprofile
                                       type: string
                                       nullable: true
-                                  required: *id012
+                                  required: *id013
                                   title: SeccompProfile
                                   type: object
                                   nullable: true
@@ -1461,7 +1570,7 @@ spec:
                               title: Tty
                               type: boolean
                               nullable: true
-                          required: *id013
+                          required: *id014
                           title: Container
                           type: object
                         type: array
@@ -1501,7 +1610,7 @@ spec:
                                         title: Mode
                                         type: integer
                                         nullable: true
-                                    required: &id014
+                                    required: &id015
                                     - key
                                     - path
                                     title: KeyToPath
@@ -1547,7 +1656,7 @@ spec:
                                         title: Mode
                                         type: integer
                                         nullable: true
-                                    required: *id014
+                                    required: *id015
                                     title: KeyToPath
                                     type: object
                                   type: array
@@ -1736,7 +1845,7 @@ spec:
                                 title: Localhostprofile
                                 type: string
                                 nullable: true
-                            required: *id012
+                            required: *id013
                             title: SeccompProfile
                             type: object
                             nullable: true
@@ -1822,7 +1931,17 @@ spec:
                   schedules a
 
                   static Pod: it starts the file it finds on the node whose kubelet
-                  finds it.'
+                  finds it.
+
+
+                  The field types are the official Kubernetes ones, so the CRD documents
+                  the
+
+                  scheduler API faithfully; the validator below refuses the parts
+                  this operator
+
+                  does not act on, rather than accepting them and quietly ignoring
+                  them.'
                 properties:
                   nodeSelector:
                     title: Nodeselector
@@ -1831,298 +1950,1560 @@ spec:
                     type: object
                     nullable: true
                   affinity:
-                    description: 'Scheduler affinity for the *installer* Pods.
-
-
-                      Only node affinity is supported. Pod affinity and anti-affinity
-                      describe
-
-                      co-location with other Pods, which a static Pod cannot honour
-                      because kubelet
-
-                      does not run the scheduler for it.'
+                    description: "Affinity is a group of affinity scheduling rules.\n\
+                      \nAttributes:\n  openapi_types (dict): The key is attribute\
+                      \ name\n                        and the value is attribute type.\n\
+                      \  attribute_map (dict): The key is attribute name\n       \
+                      \                 and the value is json key in definition."
                     properties:
                       nodeAffinity:
-                        description: The node-affinity half of scheduler placement.
+                        description: "Node affinity is a group of node affinity scheduling\
+                          \ rules.\n\nAttributes:\n  openapi_types (dict): The key\
+                          \ is attribute name\n                        and the value\
+                          \ is attribute type.\n  attribute_map (dict): The key is\
+                          \ attribute name\n                        and the value\
+                          \ is json key in definition."
                         properties:
-                          requiredDuringSchedulingIgnoredDuringExecution:
-                            description: A required node-affinity selector.
-                            properties:
-                              nodeSelectorTerms:
-                                items:
-                                  description: 'A node selector term: the predicates
-                                    a node must satisfy.'
+                          preferredDuringSchedulingIgnoredDuringExecution:
+                            description: The scheduler will prefer to schedule pods
+                              to nodes that satisfy the affinity expressions specified
+                              by this field, but it may choose a node that violates
+                              one or more of the expressions. The node that is most
+                              preferred is the one with the greatest sum of weights,
+                              i.e. for each node that meets all of the scheduling
+                              requirements (resource request, requiredDuringScheduling
+                              affinity expressions, etc.), compute a sum by iterating
+                              through the elements of this field and adding "weight"
+                              to the sum if the node matches the corresponding matchExpressions;
+                              the node(s) with the highest sum are the most preferred.
+                            title: Preferredduringschedulingignoredduringexecution
+                            items:
+                              description: "An empty preferred scheduling term matches\
+                                \ all objects with implicit weight 0 (i.e. it's a\
+                                \ no-op). A null preferred scheduling term matches\
+                                \ no objects (i.e. is also a no-op).\n\nAttributes:\n\
+                                \  openapi_types (dict): The key is attribute name\n\
+                                \                        and the value is attribute\
+                                \ type.\n  attribute_map (dict): The key is attribute\
+                                \ name\n                        and the value is json\
+                                \ key in definition."
+                              properties:
+                                preference:
+                                  description: "A null or empty node selector term\
+                                    \ matches no objects. The requirements of them\
+                                    \ are ANDed. The TopologySelectorTerm type implements\
+                                    \ a subset of the NodeSelectorTerm.\n\nAttributes:\n\
+                                    \  openapi_types (dict): The key is attribute\
+                                    \ name\n                        and the value\
+                                    \ is attribute type.\n  attribute_map (dict):\
+                                    \ The key is attribute name\n                \
+                                    \        and the value is json key in definition."
                                   properties:
                                     matchExpressions:
+                                      description: A list of node selector requirements
+                                        by node's labels.
                                       title: Matchexpressions
                                       items:
-                                        description: One ``matchExpressions``/``matchFields``
-                                          predicate of a node selector term.
+                                        description: "A node selector requirement\
+                                          \ is a selector that contains values, a\
+                                          \ key, and an operator that relates the\
+                                          \ key and values.\n\nAttributes:\n  openapi_types\
+                                          \ (dict): The key is attribute name\n  \
+                                          \                      and the value is\
+                                          \ attribute type.\n  attribute_map (dict):\
+                                          \ The key is attribute name\n          \
+                                          \              and the value is json key\
+                                          \ in definition."
                                         properties:
                                           key:
-                                            minLength: 1
+                                            description: The label key that the selector
+                                              applies to.
                                             title: Key
                                             type: string
                                           operator:
-                                            enum:
-                                            - In
-                                            - NotIn
-                                            - Exists
-                                            - DoesNotExist
-                                            - Gt
-                                            - Lt
+                                            description: Represents a key's relationship
+                                              to a set of values. Valid operators
+                                              are In, NotIn, Exists, DoesNotExist.
+                                              Gt, and Lt.
                                             title: Operator
                                             type: string
                                           values:
+                                            description: An array of string values.
+                                              If the operator is In or NotIn, the
+                                              values array must be non-empty. If the
+                                              operator is Exists or DoesNotExist,
+                                              the values array must be empty. If the
+                                              operator is Gt or Lt, the values array
+                                              must have a single element, which will
+                                              be interpreted as an integer. This array
+                                              is replaced during a strategic merge
+                                              patch.
                                             title: Values
                                             items:
                                               type: string
                                             type: array
                                             nullable: true
-                                        required: &id015
+                                        required: &id016
                                         - key
                                         - operator
-                                        title: NodeSelectorRequirement
+                                        title: V1NodeSelectorRequirement
                                         type: object
                                       type: array
                                       nullable: true
                                     matchFields:
+                                      description: A list of node selector requirements
+                                        by node's fields.
                                       title: Matchfields
                                       items:
-                                        description: One ``matchExpressions``/``matchFields``
-                                          predicate of a node selector term.
+                                        description: "A node selector requirement\
+                                          \ is a selector that contains values, a\
+                                          \ key, and an operator that relates the\
+                                          \ key and values.\n\nAttributes:\n  openapi_types\
+                                          \ (dict): The key is attribute name\n  \
+                                          \                      and the value is\
+                                          \ attribute type.\n  attribute_map (dict):\
+                                          \ The key is attribute name\n          \
+                                          \              and the value is json key\
+                                          \ in definition."
                                         properties:
                                           key:
-                                            minLength: 1
+                                            description: The label key that the selector
+                                              applies to.
                                             title: Key
                                             type: string
                                           operator:
-                                            enum:
-                                            - In
-                                            - NotIn
-                                            - Exists
-                                            - DoesNotExist
-                                            - Gt
-                                            - Lt
+                                            description: Represents a key's relationship
+                                              to a set of values. Valid operators
+                                              are In, NotIn, Exists, DoesNotExist.
+                                              Gt, and Lt.
                                             title: Operator
                                             type: string
                                           values:
+                                            description: An array of string values.
+                                              If the operator is In or NotIn, the
+                                              values array must be non-empty. If the
+                                              operator is Exists or DoesNotExist,
+                                              the values array must be empty. If the
+                                              operator is Gt or Lt, the values array
+                                              must have a single element, which will
+                                              be interpreted as an integer. This array
+                                              is replaced during a strategic merge
+                                              patch.
                                             title: Values
                                             items:
                                               type: string
                                             type: array
                                             nullable: true
-                                        required: *id015
-                                        title: NodeSelectorRequirement
+                                        required: *id016
+                                        title: V1NodeSelectorRequirement
                                         type: object
                                       type: array
                                       nullable: true
-                                  title: NodeSelectorTerm
+                                  title: V1NodeSelectorTerm
                                   type: object
-                                minItems: 1
+                                weight:
+                                  description: Weight associated with matching the
+                                    corresponding nodeSelectorTerm, in the range 1-100.
+                                  title: Weight
+                                  type: integer
+                              required:
+                              - preference
+                              - weight
+                              title: V1PreferredSchedulingTerm
+                              type: object
+                            type: array
+                            nullable: true
+                          requiredDuringSchedulingIgnoredDuringExecution:
+                            description: "A node selector represents the union of\
+                              \ the results of one or more label queries over a set\
+                              \ of nodes; that is, it represents the OR of the selectors\
+                              \ represented by the node selector terms.\n\nAttributes:\n\
+                              \  openapi_types (dict): The key is attribute name\n\
+                              \                        and the value is attribute\
+                              \ type.\n  attribute_map (dict): The key is attribute\
+                              \ name\n                        and the value is json\
+                              \ key in definition."
+                            properties:
+                              nodeSelectorTerms:
+                                description: Required. A list of node selector terms.
+                                  The terms are ORed.
+                                items:
+                                  description: "A null or empty node selector term\
+                                    \ matches no objects. The requirements of them\
+                                    \ are ANDed. The TopologySelectorTerm type implements\
+                                    \ a subset of the NodeSelectorTerm.\n\nAttributes:\n\
+                                    \  openapi_types (dict): The key is attribute\
+                                    \ name\n                        and the value\
+                                    \ is attribute type.\n  attribute_map (dict):\
+                                    \ The key is attribute name\n                \
+                                    \        and the value is json key in definition."
+                                  properties:
+                                    matchExpressions:
+                                      description: A list of node selector requirements
+                                        by node's labels.
+                                      title: Matchexpressions
+                                      items:
+                                        description: "A node selector requirement\
+                                          \ is a selector that contains values, a\
+                                          \ key, and an operator that relates the\
+                                          \ key and values.\n\nAttributes:\n  openapi_types\
+                                          \ (dict): The key is attribute name\n  \
+                                          \                      and the value is\
+                                          \ attribute type.\n  attribute_map (dict):\
+                                          \ The key is attribute name\n          \
+                                          \              and the value is json key\
+                                          \ in definition."
+                                        properties:
+                                          key:
+                                            description: The label key that the selector
+                                              applies to.
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            description: Represents a key's relationship
+                                              to a set of values. Valid operators
+                                              are In, NotIn, Exists, DoesNotExist.
+                                              Gt, and Lt.
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            description: An array of string values.
+                                              If the operator is In or NotIn, the
+                                              values array must be non-empty. If the
+                                              operator is Exists or DoesNotExist,
+                                              the values array must be empty. If the
+                                              operator is Gt or Lt, the values array
+                                              must have a single element, which will
+                                              be interpreted as an integer. This array
+                                              is replaced during a strategic merge
+                                              patch.
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id016
+                                        title: V1NodeSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                    matchFields:
+                                      description: A list of node selector requirements
+                                        by node's fields.
+                                      title: Matchfields
+                                      items:
+                                        description: "A node selector requirement\
+                                          \ is a selector that contains values, a\
+                                          \ key, and an operator that relates the\
+                                          \ key and values.\n\nAttributes:\n  openapi_types\
+                                          \ (dict): The key is attribute name\n  \
+                                          \                      and the value is\
+                                          \ attribute type.\n  attribute_map (dict):\
+                                          \ The key is attribute name\n          \
+                                          \              and the value is json key\
+                                          \ in definition."
+                                        properties:
+                                          key:
+                                            description: The label key that the selector
+                                              applies to.
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            description: Represents a key's relationship
+                                              to a set of values. Valid operators
+                                              are In, NotIn, Exists, DoesNotExist.
+                                              Gt, and Lt.
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            description: An array of string values.
+                                              If the operator is In or NotIn, the
+                                              values array must be non-empty. If the
+                                              operator is Exists or DoesNotExist,
+                                              the values array must be empty. If the
+                                              operator is Gt or Lt, the values array
+                                              must have a single element, which will
+                                              be interpreted as an integer. This array
+                                              is replaced during a strategic merge
+                                              patch.
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id016
+                                        title: V1NodeSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                  title: V1NodeSelectorTerm
+                                  type: object
                                 title: Nodeselectorterms
                                 type: array
                             required:
                             - nodeSelectorTerms
-                            title: NodeSelector
+                            title: V1NodeSelector
                             type: object
                             nullable: true
+                        title: V1NodeAffinity
+                        type: object
+                        nullable: true
+                      podAffinity:
+                        description: "Pod affinity is a group of inter pod affinity\
+                          \ scheduling rules.\n\nAttributes:\n  openapi_types (dict):\
+                          \ The key is attribute name\n                        and\
+                          \ the value is attribute type.\n  attribute_map (dict):\
+                          \ The key is attribute name\n                        and\
+                          \ the value is json key in definition."
+                        properties:
                           preferredDuringSchedulingIgnoredDuringExecution:
+                            description: The scheduler will prefer to schedule pods
+                              to nodes that satisfy the affinity expressions specified
+                              by this field, but it may choose a node that violates
+                              one or more of the expressions. The node that is most
+                              preferred is the one with the greatest sum of weights,
+                              i.e. for each node that meets all of the scheduling
+                              requirements (resource request, requiredDuringScheduling
+                              affinity expressions, etc.), compute a sum by iterating
+                              through the elements of this field and adding "weight"
+                              to the sum if the node has pods which matches the corresponding
+                              podAffinityTerm; the node(s) with the highest sum are
+                              the most preferred.
                             title: Preferredduringschedulingignoredduringexecution
                             items:
-                              description: A weighted preferred node-affinity term.
+                              description: "The weights of all of the matched WeightedPodAffinityTerm\
+                                \ fields are added per-node to find the most preferred\
+                                \ node(s)\n\nAttributes:\n  openapi_types (dict):\
+                                \ The key is attribute name\n                    \
+                                \    and the value is attribute type.\n  attribute_map\
+                                \ (dict): The key is attribute name\n            \
+                                \            and the value is json key in definition."
                               properties:
+                                podAffinityTerm:
+                                  description: "Defines a set of pods (namely those\
+                                    \ matching the labelSelector relative to the given\
+                                    \ namespace(s)) that this pod should be co-located\
+                                    \ (affinity) or not co-located (anti-affinity)\
+                                    \ with, where co-located is defined as running\
+                                    \ on a node whose value of the label with key\
+                                    \ <topologyKey> matches that of any node on which\
+                                    \ a pod of the set of pods is running\n\nAttributes:\n\
+                                    \  openapi_types (dict): The key is attribute\
+                                    \ name\n                        and the value\
+                                    \ is attribute type.\n  attribute_map (dict):\
+                                    \ The key is attribute name\n                \
+                                    \        and the value is json key in definition."
+                                  properties:
+                                    labelSelector:
+                                      description: "A label selector is a label query\
+                                        \ over a set of resources. The result of matchLabels\
+                                        \ and matchExpressions are ANDed. An empty\
+                                        \ label selector matches all objects. A null\
+                                        \ label selector matches no objects.\n\nAttributes:\n\
+                                        \  openapi_types (dict): The key is attribute\
+                                        \ name\n                        and the value\
+                                        \ is attribute type.\n  attribute_map (dict):\
+                                        \ The key is attribute name\n            \
+                                        \            and the value is json key in\
+                                        \ definition."
+                                      properties:
+                                        matchExpressions:
+                                          description: matchExpressions is a list
+                                            of label selector requirements. The requirements
+                                            are ANDed.
+                                          title: Matchexpressions
+                                          items:
+                                            description: "A label selector requirement\
+                                              \ is a selector that contains values,\
+                                              \ a key, and an operator that relates\
+                                              \ the key and values.\n\nAttributes:\n\
+                                              \  openapi_types (dict): The key is\
+                                              \ attribute name\n                 \
+                                              \       and the value is attribute type.\n\
+                                              \  attribute_map (dict): The key is\
+                                              \ attribute name\n                 \
+                                              \       and the value is json key in\
+                                              \ definition."
+                                            properties:
+                                              key:
+                                                description: key is the label key
+                                                  that the selector applies to.
+                                                title: Key
+                                                type: string
+                                              operator:
+                                                description: operator represents a
+                                                  key's relationship to a set of values.
+                                                  Valid operators are In, NotIn, Exists
+                                                  and DoesNotExist.
+                                                title: Operator
+                                                type: string
+                                              values:
+                                                description: values is an array of
+                                                  string values. If the operator is
+                                                  In or NotIn, the values array must
+                                                  be non-empty. If the operator is
+                                                  Exists or DoesNotExist, the values
+                                                  array must be empty. This array
+                                                  is replaced during a strategic merge
+                                                  patch.
+                                                title: Values
+                                                items:
+                                                  type: string
+                                                type: array
+                                                nullable: true
+                                            required: &id017
+                                            - key
+                                            - operator
+                                            title: V1LabelSelectorRequirement
+                                            type: object
+                                          type: array
+                                          nullable: true
+                                        matchLabels:
+                                          description: matchLabels is a map of {key,value}
+                                            pairs. A single {key,value} in the matchLabels
+                                            map is equivalent to an element of matchExpressions,
+                                            whose key field is "key", the operator
+                                            is "In", and the values array contains
+                                            only "value". The requirements are ANDed.
+                                          title: Matchlabels
+                                          additionalProperties:
+                                            type: string
+                                          type: object
+                                          nullable: true
+                                      title: V1LabelSelector
+                                      type: object
+                                      nullable: true
+                                    matchLabelKeys:
+                                      description: MatchLabelKeys is a set of pod
+                                        label keys to select which pods will be taken
+                                        into consideration. The keys are used to lookup
+                                        values from the incoming pod labels, those
+                                        key-value labels are merged with `labelSelector`
+                                        as `key in (value)` to select the group of
+                                        existing pods which pods will be taken into
+                                        consideration for the incoming pod's pod (anti)
+                                        affinity. Keys that don't exist in the incoming
+                                        pod labels will be ignored. The default value
+                                        is empty. The same key is forbidden to exist
+                                        in both matchLabelKeys and labelSelector.
+                                        Also, matchLabelKeys cannot be set when labelSelector
+                                        isn't set.
+                                      title: Matchlabelkeys
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                    mismatchLabelKeys:
+                                      description: MismatchLabelKeys is a set of pod
+                                        label keys to select which pods will be taken
+                                        into consideration. The keys are used to lookup
+                                        values from the incoming pod labels, those
+                                        key-value labels are merged with `labelSelector`
+                                        as `key notin (value)` to select the group
+                                        of existing pods which pods will be taken
+                                        into consideration for the incoming pod's
+                                        pod (anti) affinity. Keys that don't exist
+                                        in the incoming pod labels will be ignored.
+                                        The default value is empty. The same key is
+                                        forbidden to exist in both mismatchLabelKeys
+                                        and labelSelector. Also, mismatchLabelKeys
+                                        cannot be set when labelSelector isn't set.
+                                      title: Mismatchlabelkeys
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                    namespaceSelector:
+                                      description: "A label selector is a label query\
+                                        \ over a set of resources. The result of matchLabels\
+                                        \ and matchExpressions are ANDed. An empty\
+                                        \ label selector matches all objects. A null\
+                                        \ label selector matches no objects.\n\nAttributes:\n\
+                                        \  openapi_types (dict): The key is attribute\
+                                        \ name\n                        and the value\
+                                        \ is attribute type.\n  attribute_map (dict):\
+                                        \ The key is attribute name\n            \
+                                        \            and the value is json key in\
+                                        \ definition."
+                                      properties:
+                                        matchExpressions:
+                                          description: matchExpressions is a list
+                                            of label selector requirements. The requirements
+                                            are ANDed.
+                                          title: Matchexpressions
+                                          items:
+                                            description: "A label selector requirement\
+                                              \ is a selector that contains values,\
+                                              \ a key, and an operator that relates\
+                                              \ the key and values.\n\nAttributes:\n\
+                                              \  openapi_types (dict): The key is\
+                                              \ attribute name\n                 \
+                                              \       and the value is attribute type.\n\
+                                              \  attribute_map (dict): The key is\
+                                              \ attribute name\n                 \
+                                              \       and the value is json key in\
+                                              \ definition."
+                                            properties:
+                                              key:
+                                                description: key is the label key
+                                                  that the selector applies to.
+                                                title: Key
+                                                type: string
+                                              operator:
+                                                description: operator represents a
+                                                  key's relationship to a set of values.
+                                                  Valid operators are In, NotIn, Exists
+                                                  and DoesNotExist.
+                                                title: Operator
+                                                type: string
+                                              values:
+                                                description: values is an array of
+                                                  string values. If the operator is
+                                                  In or NotIn, the values array must
+                                                  be non-empty. If the operator is
+                                                  Exists or DoesNotExist, the values
+                                                  array must be empty. This array
+                                                  is replaced during a strategic merge
+                                                  patch.
+                                                title: Values
+                                                items:
+                                                  type: string
+                                                type: array
+                                                nullable: true
+                                            required: *id017
+                                            title: V1LabelSelectorRequirement
+                                            type: object
+                                          type: array
+                                          nullable: true
+                                        matchLabels:
+                                          description: matchLabels is a map of {key,value}
+                                            pairs. A single {key,value} in the matchLabels
+                                            map is equivalent to an element of matchExpressions,
+                                            whose key field is "key", the operator
+                                            is "In", and the values array contains
+                                            only "value". The requirements are ANDed.
+                                          title: Matchlabels
+                                          additionalProperties:
+                                            type: string
+                                          type: object
+                                          nullable: true
+                                      title: V1LabelSelector
+                                      type: object
+                                      nullable: true
+                                    namespaces:
+                                      description: namespaces specifies a static list
+                                        of namespace names that the term applies to.
+                                        The term is applied to the union of the namespaces
+                                        listed in this field and the ones selected
+                                        by namespaceSelector. null or empty namespaces
+                                        list and null namespaceSelector means "this
+                                        pod's namespace".
+                                      title: Namespaces
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                    topologyKey:
+                                      description: This pod should be co-located (affinity)
+                                        or not co-located (anti-affinity) with the
+                                        pods matching the labelSelector in the specified
+                                        namespaces, where co-located is defined as
+                                        running on a node whose value of the label
+                                        with key topologyKey matches that of any node
+                                        on which any of the selected pods is running.
+                                        Empty topologyKey is not allowed.
+                                      title: Topologykey
+                                      type: string
+                                  required: &id018
+                                  - topologyKey
+                                  title: V1PodAffinityTerm
+                                  type: object
                                 weight:
-                                  maximum: 100
-                                  minimum: 1
+                                  description: weight associated with matching the
+                                    corresponding podAffinityTerm, in the range 1-100.
                                   title: Weight
                                   type: integer
-                                preference:
-                                  description: 'A node selector term: the predicates
-                                    a node must satisfy.'
-                                  properties:
-                                    matchExpressions:
-                                      title: Matchexpressions
-                                      items:
-                                        description: One ``matchExpressions``/``matchFields``
-                                          predicate of a node selector term.
-                                        properties:
-                                          key:
-                                            minLength: 1
-                                            title: Key
-                                            type: string
-                                          operator:
-                                            enum:
-                                            - In
-                                            - NotIn
-                                            - Exists
-                                            - DoesNotExist
-                                            - Gt
-                                            - Lt
-                                            title: Operator
-                                            type: string
-                                          values:
-                                            title: Values
-                                            items:
-                                              type: string
-                                            type: array
-                                            nullable: true
-                                        required: *id015
-                                        title: NodeSelectorRequirement
-                                        type: object
-                                      type: array
-                                      nullable: true
-                                    matchFields:
-                                      title: Matchfields
-                                      items:
-                                        description: One ``matchExpressions``/``matchFields``
-                                          predicate of a node selector term.
-                                        properties:
-                                          key:
-                                            minLength: 1
-                                            title: Key
-                                            type: string
-                                          operator:
-                                            enum:
-                                            - In
-                                            - NotIn
-                                            - Exists
-                                            - DoesNotExist
-                                            - Gt
-                                            - Lt
-                                            title: Operator
-                                            type: string
-                                          values:
-                                            title: Values
-                                            items:
-                                              type: string
-                                            type: array
-                                            nullable: true
-                                        required: *id015
-                                        title: NodeSelectorRequirement
-                                        type: object
-                                      type: array
-                                      nullable: true
-                                  title: NodeSelectorTerm
-                                  type: object
-                              required:
+                              required: &id019
+                              - podAffinityTerm
                               - weight
-                              - preference
-                              title: PreferredSchedulingTerm
+                              title: V1WeightedPodAffinityTerm
                               type: object
                             type: array
                             nullable: true
-                        title: NodeAffinity
+                          requiredDuringSchedulingIgnoredDuringExecution:
+                            description: If the affinity requirements specified by
+                              this field are not met at scheduling time, the pod will
+                              not be scheduled onto the node. If the affinity requirements
+                              specified by this field cease to be met at some point
+                              during pod execution (e.g. due to a pod label update),
+                              the system may or may not try to eventually evict the
+                              pod from its node. When there are multiple elements,
+                              the lists of nodes corresponding to each podAffinityTerm
+                              are intersected, i.e. all terms must be satisfied.
+                            title: Requiredduringschedulingignoredduringexecution
+                            items:
+                              description: "Defines a set of pods (namely those matching\
+                                \ the labelSelector relative to the given namespace(s))\
+                                \ that this pod should be co-located (affinity) or\
+                                \ not co-located (anti-affinity) with, where co-located\
+                                \ is defined as running on a node whose value of the\
+                                \ label with key <topologyKey> matches that of any\
+                                \ node on which a pod of the set of pods is running\n\
+                                \nAttributes:\n  openapi_types (dict): The key is\
+                                \ attribute name\n                        and the\
+                                \ value is attribute type.\n  attribute_map (dict):\
+                                \ The key is attribute name\n                    \
+                                \    and the value is json key in definition."
+                              properties:
+                                labelSelector:
+                                  description: "A label selector is a label query\
+                                    \ over a set of resources. The result of matchLabels\
+                                    \ and matchExpressions are ANDed. An empty label\
+                                    \ selector matches all objects. A null label selector\
+                                    \ matches no objects.\n\nAttributes:\n  openapi_types\
+                                    \ (dict): The key is attribute name\n        \
+                                    \                and the value is attribute type.\n\
+                                    \  attribute_map (dict): The key is attribute\
+                                    \ name\n                        and the value\
+                                    \ is json key in definition."
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      title: Matchexpressions
+                                      items:
+                                        description: "A label selector requirement\
+                                          \ is a selector that contains values, a\
+                                          \ key, and an operator that relates the\
+                                          \ key and values.\n\nAttributes:\n  openapi_types\
+                                          \ (dict): The key is attribute name\n  \
+                                          \                      and the value is\
+                                          \ attribute type.\n  attribute_map (dict):\
+                                          \ The key is attribute name\n          \
+                                          \              and the value is json key\
+                                          \ in definition."
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            description: operator represents a key's
+                                              relationship to a set of values. Valid
+                                              operators are In, NotIn, Exists and
+                                              DoesNotExist.
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            description: values is an array of string
+                                              values. If the operator is In or NotIn,
+                                              the values array must be non-empty.
+                                              If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This
+                                              array is replaced during a strategic
+                                              merge patch.
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id017
+                                        title: V1LabelSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                    matchLabels:
+                                      description: matchLabels is a map of {key,value}
+                                        pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions,
+                                        whose key field is "key", the operator is
+                                        "In", and the values array contains only "value".
+                                        The requirements are ANDed.
+                                      title: Matchlabels
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                      nullable: true
+                                  title: V1LabelSelector
+                                  type: object
+                                  nullable: true
+                                matchLabelKeys:
+                                  description: MatchLabelKeys is a set of pod label
+                                    keys to select which pods will be taken into consideration.
+                                    The keys are used to lookup values from the incoming
+                                    pod labels, those key-value labels are merged
+                                    with `labelSelector` as `key in (value)` to select
+                                    the group of existing pods which pods will be
+                                    taken into consideration for the incoming pod's
+                                    pod (anti) affinity. Keys that don't exist in
+                                    the incoming pod labels will be ignored. The default
+                                    value is empty. The same key is forbidden to exist
+                                    in both matchLabelKeys and labelSelector. Also,
+                                    matchLabelKeys cannot be set when labelSelector
+                                    isn't set.
+                                  title: Matchlabelkeys
+                                  items:
+                                    type: string
+                                  type: array
+                                  nullable: true
+                                mismatchLabelKeys:
+                                  description: MismatchLabelKeys is a set of pod label
+                                    keys to select which pods will be taken into consideration.
+                                    The keys are used to lookup values from the incoming
+                                    pod labels, those key-value labels are merged
+                                    with `labelSelector` as `key notin (value)` to
+                                    select the group of existing pods which pods will
+                                    be taken into consideration for the incoming pod's
+                                    pod (anti) affinity. Keys that don't exist in
+                                    the incoming pod labels will be ignored. The default
+                                    value is empty. The same key is forbidden to exist
+                                    in both mismatchLabelKeys and labelSelector. Also,
+                                    mismatchLabelKeys cannot be set when labelSelector
+                                    isn't set.
+                                  title: Mismatchlabelkeys
+                                  items:
+                                    type: string
+                                  type: array
+                                  nullable: true
+                                namespaceSelector:
+                                  description: "A label selector is a label query\
+                                    \ over a set of resources. The result of matchLabels\
+                                    \ and matchExpressions are ANDed. An empty label\
+                                    \ selector matches all objects. A null label selector\
+                                    \ matches no objects.\n\nAttributes:\n  openapi_types\
+                                    \ (dict): The key is attribute name\n        \
+                                    \                and the value is attribute type.\n\
+                                    \  attribute_map (dict): The key is attribute\
+                                    \ name\n                        and the value\
+                                    \ is json key in definition."
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      title: Matchexpressions
+                                      items:
+                                        description: "A label selector requirement\
+                                          \ is a selector that contains values, a\
+                                          \ key, and an operator that relates the\
+                                          \ key and values.\n\nAttributes:\n  openapi_types\
+                                          \ (dict): The key is attribute name\n  \
+                                          \                      and the value is\
+                                          \ attribute type.\n  attribute_map (dict):\
+                                          \ The key is attribute name\n          \
+                                          \              and the value is json key\
+                                          \ in definition."
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            description: operator represents a key's
+                                              relationship to a set of values. Valid
+                                              operators are In, NotIn, Exists and
+                                              DoesNotExist.
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            description: values is an array of string
+                                              values. If the operator is In or NotIn,
+                                              the values array must be non-empty.
+                                              If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This
+                                              array is replaced during a strategic
+                                              merge patch.
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id017
+                                        title: V1LabelSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                    matchLabels:
+                                      description: matchLabels is a map of {key,value}
+                                        pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions,
+                                        whose key field is "key", the operator is
+                                        "In", and the values array contains only "value".
+                                        The requirements are ANDed.
+                                      title: Matchlabels
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                      nullable: true
+                                  title: V1LabelSelector
+                                  type: object
+                                  nullable: true
+                                namespaces:
+                                  description: namespaces specifies a static list
+                                    of namespace names that the term applies to. The
+                                    term is applied to the union of the namespaces
+                                    listed in this field and the ones selected by
+                                    namespaceSelector. null or empty namespaces list
+                                    and null namespaceSelector means "this pod's namespace".
+                                  title: Namespaces
+                                  items:
+                                    type: string
+                                  type: array
+                                  nullable: true
+                                topologyKey:
+                                  description: This pod should be co-located (affinity)
+                                    or not co-located (anti-affinity) with the pods
+                                    matching the labelSelector in the specified namespaces,
+                                    where co-located is defined as running on a node
+                                    whose value of the label with key topologyKey
+                                    matches that of any node on which any of the selected
+                                    pods is running. Empty topologyKey is not allowed.
+                                  title: Topologykey
+                                  type: string
+                              required: *id018
+                              title: V1PodAffinityTerm
+                              type: object
+                            type: array
+                            nullable: true
+                        title: V1PodAffinity
                         type: object
                         nullable: true
-                    title: Affinity
+                      podAntiAffinity:
+                        description: "Pod anti affinity is a group of inter pod anti\
+                          \ affinity scheduling rules.\n\nAttributes:\n  openapi_types\
+                          \ (dict): The key is attribute name\n                  \
+                          \      and the value is attribute type.\n  attribute_map\
+                          \ (dict): The key is attribute name\n                  \
+                          \      and the value is json key in definition."
+                        properties:
+                          preferredDuringSchedulingIgnoredDuringExecution:
+                            description: The scheduler will prefer to schedule pods
+                              to nodes that satisfy the anti-affinity expressions
+                              specified by this field, but it may choose a node that
+                              violates one or more of the expressions. The node that
+                              is most preferred is the one with the greatest sum of
+                              weights, i.e. for each node that meets all of the scheduling
+                              requirements (resource request, requiredDuringScheduling
+                              anti-affinity expressions, etc.), compute a sum by iterating
+                              through the elements of this field and subtracting "weight"
+                              from the sum if the node has pods which matches the
+                              corresponding podAffinityTerm; the node(s) with the
+                              highest sum are the most preferred.
+                            title: Preferredduringschedulingignoredduringexecution
+                            items:
+                              description: "The weights of all of the matched WeightedPodAffinityTerm\
+                                \ fields are added per-node to find the most preferred\
+                                \ node(s)\n\nAttributes:\n  openapi_types (dict):\
+                                \ The key is attribute name\n                    \
+                                \    and the value is attribute type.\n  attribute_map\
+                                \ (dict): The key is attribute name\n            \
+                                \            and the value is json key in definition."
+                              properties:
+                                podAffinityTerm:
+                                  description: "Defines a set of pods (namely those\
+                                    \ matching the labelSelector relative to the given\
+                                    \ namespace(s)) that this pod should be co-located\
+                                    \ (affinity) or not co-located (anti-affinity)\
+                                    \ with, where co-located is defined as running\
+                                    \ on a node whose value of the label with key\
+                                    \ <topologyKey> matches that of any node on which\
+                                    \ a pod of the set of pods is running\n\nAttributes:\n\
+                                    \  openapi_types (dict): The key is attribute\
+                                    \ name\n                        and the value\
+                                    \ is attribute type.\n  attribute_map (dict):\
+                                    \ The key is attribute name\n                \
+                                    \        and the value is json key in definition."
+                                  properties:
+                                    labelSelector:
+                                      description: "A label selector is a label query\
+                                        \ over a set of resources. The result of matchLabels\
+                                        \ and matchExpressions are ANDed. An empty\
+                                        \ label selector matches all objects. A null\
+                                        \ label selector matches no objects.\n\nAttributes:\n\
+                                        \  openapi_types (dict): The key is attribute\
+                                        \ name\n                        and the value\
+                                        \ is attribute type.\n  attribute_map (dict):\
+                                        \ The key is attribute name\n            \
+                                        \            and the value is json key in\
+                                        \ definition."
+                                      properties:
+                                        matchExpressions:
+                                          description: matchExpressions is a list
+                                            of label selector requirements. The requirements
+                                            are ANDed.
+                                          title: Matchexpressions
+                                          items:
+                                            description: "A label selector requirement\
+                                              \ is a selector that contains values,\
+                                              \ a key, and an operator that relates\
+                                              \ the key and values.\n\nAttributes:\n\
+                                              \  openapi_types (dict): The key is\
+                                              \ attribute name\n                 \
+                                              \       and the value is attribute type.\n\
+                                              \  attribute_map (dict): The key is\
+                                              \ attribute name\n                 \
+                                              \       and the value is json key in\
+                                              \ definition."
+                                            properties:
+                                              key:
+                                                description: key is the label key
+                                                  that the selector applies to.
+                                                title: Key
+                                                type: string
+                                              operator:
+                                                description: operator represents a
+                                                  key's relationship to a set of values.
+                                                  Valid operators are In, NotIn, Exists
+                                                  and DoesNotExist.
+                                                title: Operator
+                                                type: string
+                                              values:
+                                                description: values is an array of
+                                                  string values. If the operator is
+                                                  In or NotIn, the values array must
+                                                  be non-empty. If the operator is
+                                                  Exists or DoesNotExist, the values
+                                                  array must be empty. This array
+                                                  is replaced during a strategic merge
+                                                  patch.
+                                                title: Values
+                                                items:
+                                                  type: string
+                                                type: array
+                                                nullable: true
+                                            required: *id017
+                                            title: V1LabelSelectorRequirement
+                                            type: object
+                                          type: array
+                                          nullable: true
+                                        matchLabels:
+                                          description: matchLabels is a map of {key,value}
+                                            pairs. A single {key,value} in the matchLabels
+                                            map is equivalent to an element of matchExpressions,
+                                            whose key field is "key", the operator
+                                            is "In", and the values array contains
+                                            only "value". The requirements are ANDed.
+                                          title: Matchlabels
+                                          additionalProperties:
+                                            type: string
+                                          type: object
+                                          nullable: true
+                                      title: V1LabelSelector
+                                      type: object
+                                      nullable: true
+                                    matchLabelKeys:
+                                      description: MatchLabelKeys is a set of pod
+                                        label keys to select which pods will be taken
+                                        into consideration. The keys are used to lookup
+                                        values from the incoming pod labels, those
+                                        key-value labels are merged with `labelSelector`
+                                        as `key in (value)` to select the group of
+                                        existing pods which pods will be taken into
+                                        consideration for the incoming pod's pod (anti)
+                                        affinity. Keys that don't exist in the incoming
+                                        pod labels will be ignored. The default value
+                                        is empty. The same key is forbidden to exist
+                                        in both matchLabelKeys and labelSelector.
+                                        Also, matchLabelKeys cannot be set when labelSelector
+                                        isn't set.
+                                      title: Matchlabelkeys
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                    mismatchLabelKeys:
+                                      description: MismatchLabelKeys is a set of pod
+                                        label keys to select which pods will be taken
+                                        into consideration. The keys are used to lookup
+                                        values from the incoming pod labels, those
+                                        key-value labels are merged with `labelSelector`
+                                        as `key notin (value)` to select the group
+                                        of existing pods which pods will be taken
+                                        into consideration for the incoming pod's
+                                        pod (anti) affinity. Keys that don't exist
+                                        in the incoming pod labels will be ignored.
+                                        The default value is empty. The same key is
+                                        forbidden to exist in both mismatchLabelKeys
+                                        and labelSelector. Also, mismatchLabelKeys
+                                        cannot be set when labelSelector isn't set.
+                                      title: Mismatchlabelkeys
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                    namespaceSelector:
+                                      description: "A label selector is a label query\
+                                        \ over a set of resources. The result of matchLabels\
+                                        \ and matchExpressions are ANDed. An empty\
+                                        \ label selector matches all objects. A null\
+                                        \ label selector matches no objects.\n\nAttributes:\n\
+                                        \  openapi_types (dict): The key is attribute\
+                                        \ name\n                        and the value\
+                                        \ is attribute type.\n  attribute_map (dict):\
+                                        \ The key is attribute name\n            \
+                                        \            and the value is json key in\
+                                        \ definition."
+                                      properties:
+                                        matchExpressions:
+                                          description: matchExpressions is a list
+                                            of label selector requirements. The requirements
+                                            are ANDed.
+                                          title: Matchexpressions
+                                          items:
+                                            description: "A label selector requirement\
+                                              \ is a selector that contains values,\
+                                              \ a key, and an operator that relates\
+                                              \ the key and values.\n\nAttributes:\n\
+                                              \  openapi_types (dict): The key is\
+                                              \ attribute name\n                 \
+                                              \       and the value is attribute type.\n\
+                                              \  attribute_map (dict): The key is\
+                                              \ attribute name\n                 \
+                                              \       and the value is json key in\
+                                              \ definition."
+                                            properties:
+                                              key:
+                                                description: key is the label key
+                                                  that the selector applies to.
+                                                title: Key
+                                                type: string
+                                              operator:
+                                                description: operator represents a
+                                                  key's relationship to a set of values.
+                                                  Valid operators are In, NotIn, Exists
+                                                  and DoesNotExist.
+                                                title: Operator
+                                                type: string
+                                              values:
+                                                description: values is an array of
+                                                  string values. If the operator is
+                                                  In or NotIn, the values array must
+                                                  be non-empty. If the operator is
+                                                  Exists or DoesNotExist, the values
+                                                  array must be empty. This array
+                                                  is replaced during a strategic merge
+                                                  patch.
+                                                title: Values
+                                                items:
+                                                  type: string
+                                                type: array
+                                                nullable: true
+                                            required: *id017
+                                            title: V1LabelSelectorRequirement
+                                            type: object
+                                          type: array
+                                          nullable: true
+                                        matchLabels:
+                                          description: matchLabels is a map of {key,value}
+                                            pairs. A single {key,value} in the matchLabels
+                                            map is equivalent to an element of matchExpressions,
+                                            whose key field is "key", the operator
+                                            is "In", and the values array contains
+                                            only "value". The requirements are ANDed.
+                                          title: Matchlabels
+                                          additionalProperties:
+                                            type: string
+                                          type: object
+                                          nullable: true
+                                      title: V1LabelSelector
+                                      type: object
+                                      nullable: true
+                                    namespaces:
+                                      description: namespaces specifies a static list
+                                        of namespace names that the term applies to.
+                                        The term is applied to the union of the namespaces
+                                        listed in this field and the ones selected
+                                        by namespaceSelector. null or empty namespaces
+                                        list and null namespaceSelector means "this
+                                        pod's namespace".
+                                      title: Namespaces
+                                      items:
+                                        type: string
+                                      type: array
+                                      nullable: true
+                                    topologyKey:
+                                      description: This pod should be co-located (affinity)
+                                        or not co-located (anti-affinity) with the
+                                        pods matching the labelSelector in the specified
+                                        namespaces, where co-located is defined as
+                                        running on a node whose value of the label
+                                        with key topologyKey matches that of any node
+                                        on which any of the selected pods is running.
+                                        Empty topologyKey is not allowed.
+                                      title: Topologykey
+                                      type: string
+                                  required: *id018
+                                  title: V1PodAffinityTerm
+                                  type: object
+                                weight:
+                                  description: weight associated with matching the
+                                    corresponding podAffinityTerm, in the range 1-100.
+                                  title: Weight
+                                  type: integer
+                              required: *id019
+                              title: V1WeightedPodAffinityTerm
+                              type: object
+                            type: array
+                            nullable: true
+                          requiredDuringSchedulingIgnoredDuringExecution:
+                            description: If the anti-affinity requirements specified
+                              by this field are not met at scheduling time, the pod
+                              will not be scheduled onto the node. If the anti-affinity
+                              requirements specified by this field cease to be met
+                              at some point during pod execution (e.g. due to a pod
+                              label update), the system may or may not try to eventually
+                              evict the pod from its node. When there are multiple
+                              elements, the lists of nodes corresponding to each podAffinityTerm
+                              are intersected, i.e. all terms must be satisfied.
+                            title: Requiredduringschedulingignoredduringexecution
+                            items:
+                              description: "Defines a set of pods (namely those matching\
+                                \ the labelSelector relative to the given namespace(s))\
+                                \ that this pod should be co-located (affinity) or\
+                                \ not co-located (anti-affinity) with, where co-located\
+                                \ is defined as running on a node whose value of the\
+                                \ label with key <topologyKey> matches that of any\
+                                \ node on which a pod of the set of pods is running\n\
+                                \nAttributes:\n  openapi_types (dict): The key is\
+                                \ attribute name\n                        and the\
+                                \ value is attribute type.\n  attribute_map (dict):\
+                                \ The key is attribute name\n                    \
+                                \    and the value is json key in definition."
+                              properties:
+                                labelSelector:
+                                  description: "A label selector is a label query\
+                                    \ over a set of resources. The result of matchLabels\
+                                    \ and matchExpressions are ANDed. An empty label\
+                                    \ selector matches all objects. A null label selector\
+                                    \ matches no objects.\n\nAttributes:\n  openapi_types\
+                                    \ (dict): The key is attribute name\n        \
+                                    \                and the value is attribute type.\n\
+                                    \  attribute_map (dict): The key is attribute\
+                                    \ name\n                        and the value\
+                                    \ is json key in definition."
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      title: Matchexpressions
+                                      items:
+                                        description: "A label selector requirement\
+                                          \ is a selector that contains values, a\
+                                          \ key, and an operator that relates the\
+                                          \ key and values.\n\nAttributes:\n  openapi_types\
+                                          \ (dict): The key is attribute name\n  \
+                                          \                      and the value is\
+                                          \ attribute type.\n  attribute_map (dict):\
+                                          \ The key is attribute name\n          \
+                                          \              and the value is json key\
+                                          \ in definition."
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            description: operator represents a key's
+                                              relationship to a set of values. Valid
+                                              operators are In, NotIn, Exists and
+                                              DoesNotExist.
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            description: values is an array of string
+                                              values. If the operator is In or NotIn,
+                                              the values array must be non-empty.
+                                              If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This
+                                              array is replaced during a strategic
+                                              merge patch.
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id017
+                                        title: V1LabelSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                    matchLabels:
+                                      description: matchLabels is a map of {key,value}
+                                        pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions,
+                                        whose key field is "key", the operator is
+                                        "In", and the values array contains only "value".
+                                        The requirements are ANDed.
+                                      title: Matchlabels
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                      nullable: true
+                                  title: V1LabelSelector
+                                  type: object
+                                  nullable: true
+                                matchLabelKeys:
+                                  description: MatchLabelKeys is a set of pod label
+                                    keys to select which pods will be taken into consideration.
+                                    The keys are used to lookup values from the incoming
+                                    pod labels, those key-value labels are merged
+                                    with `labelSelector` as `key in (value)` to select
+                                    the group of existing pods which pods will be
+                                    taken into consideration for the incoming pod's
+                                    pod (anti) affinity. Keys that don't exist in
+                                    the incoming pod labels will be ignored. The default
+                                    value is empty. The same key is forbidden to exist
+                                    in both matchLabelKeys and labelSelector. Also,
+                                    matchLabelKeys cannot be set when labelSelector
+                                    isn't set.
+                                  title: Matchlabelkeys
+                                  items:
+                                    type: string
+                                  type: array
+                                  nullable: true
+                                mismatchLabelKeys:
+                                  description: MismatchLabelKeys is a set of pod label
+                                    keys to select which pods will be taken into consideration.
+                                    The keys are used to lookup values from the incoming
+                                    pod labels, those key-value labels are merged
+                                    with `labelSelector` as `key notin (value)` to
+                                    select the group of existing pods which pods will
+                                    be taken into consideration for the incoming pod's
+                                    pod (anti) affinity. Keys that don't exist in
+                                    the incoming pod labels will be ignored. The default
+                                    value is empty. The same key is forbidden to exist
+                                    in both mismatchLabelKeys and labelSelector. Also,
+                                    mismatchLabelKeys cannot be set when labelSelector
+                                    isn't set.
+                                  title: Mismatchlabelkeys
+                                  items:
+                                    type: string
+                                  type: array
+                                  nullable: true
+                                namespaceSelector:
+                                  description: "A label selector is a label query\
+                                    \ over a set of resources. The result of matchLabels\
+                                    \ and matchExpressions are ANDed. An empty label\
+                                    \ selector matches all objects. A null label selector\
+                                    \ matches no objects.\n\nAttributes:\n  openapi_types\
+                                    \ (dict): The key is attribute name\n        \
+                                    \                and the value is attribute type.\n\
+                                    \  attribute_map (dict): The key is attribute\
+                                    \ name\n                        and the value\
+                                    \ is json key in definition."
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      title: Matchexpressions
+                                      items:
+                                        description: "A label selector requirement\
+                                          \ is a selector that contains values, a\
+                                          \ key, and an operator that relates the\
+                                          \ key and values.\n\nAttributes:\n  openapi_types\
+                                          \ (dict): The key is attribute name\n  \
+                                          \                      and the value is\
+                                          \ attribute type.\n  attribute_map (dict):\
+                                          \ The key is attribute name\n          \
+                                          \              and the value is json key\
+                                          \ in definition."
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            title: Key
+                                            type: string
+                                          operator:
+                                            description: operator represents a key's
+                                              relationship to a set of values. Valid
+                                              operators are In, NotIn, Exists and
+                                              DoesNotExist.
+                                            title: Operator
+                                            type: string
+                                          values:
+                                            description: values is an array of string
+                                              values. If the operator is In or NotIn,
+                                              the values array must be non-empty.
+                                              If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This
+                                              array is replaced during a strategic
+                                              merge patch.
+                                            title: Values
+                                            items:
+                                              type: string
+                                            type: array
+                                            nullable: true
+                                        required: *id017
+                                        title: V1LabelSelectorRequirement
+                                        type: object
+                                      type: array
+                                      nullable: true
+                                    matchLabels:
+                                      description: matchLabels is a map of {key,value}
+                                        pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions,
+                                        whose key field is "key", the operator is
+                                        "In", and the values array contains only "value".
+                                        The requirements are ANDed.
+                                      title: Matchlabels
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                      nullable: true
+                                  title: V1LabelSelector
+                                  type: object
+                                  nullable: true
+                                namespaces:
+                                  description: namespaces specifies a static list
+                                    of namespace names that the term applies to. The
+                                    term is applied to the union of the namespaces
+                                    listed in this field and the ones selected by
+                                    namespaceSelector. null or empty namespaces list
+                                    and null namespaceSelector means "this pod's namespace".
+                                  title: Namespaces
+                                  items:
+                                    type: string
+                                  type: array
+                                  nullable: true
+                                topologyKey:
+                                  description: This pod should be co-located (affinity)
+                                    or not co-located (anti-affinity) with the pods
+                                    matching the labelSelector in the specified namespaces,
+                                    where co-located is defined as running on a node
+                                    whose value of the label with key topologyKey
+                                    matches that of any node on which any of the selected
+                                    pods is running. Empty topologyKey is not allowed.
+                                  title: Topologykey
+                                  type: string
+                              required: *id018
+                              title: V1PodAffinityTerm
+                              type: object
+                            type: array
+                            nullable: true
+                        title: V1PodAntiAffinity
+                        type: object
+                        nullable: true
+                    title: V1Affinity
                     type: object
                     nullable: true
                   tolerations:
                     title: Tolerations
                     items:
-                      description: A toleration an installer Pod must carry to be
-                        scheduled on a tainted node.
+                      description: "The pod this Toleration is attached to tolerates\
+                        \ any taint that matches the triple <key,value,effect> using\
+                        \ the matching operator <operator>.\n\nAttributes:\n  openapi_types\
+                        \ (dict): The key is attribute name\n                    \
+                        \    and the value is attribute type.\n  attribute_map (dict):\
+                        \ The key is attribute name\n                        and the\
+                        \ value is json key in definition."
                       properties:
+                        effect:
+                          description: Effect indicates the taint effect to match.
+                            Empty means match all taint effects. When specified, allowed
+                            values are NoSchedule, PreferNoSchedule and NoExecute.
+                          title: Effect
+                          type: string
+                          nullable: true
                         key:
+                          description: Key is the taint key that the toleration applies
+                            to. Empty means match all taint keys. If the key is empty,
+                            operator must be Exists; this combination means to match
+                            all values and all keys.
                           title: Key
                           type: string
                           nullable: true
                         operator:
+                          description: Operator represents a key's relationship to
+                            the value. Valid operators are Exists, Equal, Lt, and
+                            Gt. Defaults to Equal. Exists is equivalent to wildcard
+                            for value, so that a pod can tolerate all taints of a
+                            particular category. Lt and Gt perform numeric comparisons
+                            (requires feature gate TaintTolerationComparisonOperators).
                           title: Operator
-                          enum:
-                          - Exists
-                          - Equal
-                          type: string
-                          nullable: true
-                        value:
-                          title: Value
-                          type: string
-                          nullable: true
-                        effect:
-                          title: Effect
-                          enum:
-                          - NoSchedule
-                          - PreferNoSchedule
-                          - NoExecute
                           type: string
                           nullable: true
                         tolerationSeconds:
+                          description: TolerationSeconds represents the period of
+                            time the toleration (which must be of effect NoExecute,
+                            otherwise this field is ignored) tolerates the taint.
+                            By default, it is not set, which means tolerate the taint
+                            forever (do not evict). Zero and negative values will
+                            be treated as 0 (evict immediately) by the system.
                           title: Tolerationseconds
                           type: integer
                           nullable: true
-                      title: Toleration
+                        value:
+                          description: Value is the taint value the toleration matches
+                            to. If the operator is Exists, the value should be empty,
+                            otherwise just a regular string.
+                          title: Value
+                          type: string
+                          nullable: true
+                      title: V1Toleration
                       type: object
                     type: array
                     nullable: true
                   topologySpreadConstraints:
                     title: Topologyspreadconstraints
                     items:
-                      description: A supported topology spread constraint for installer
-                        placement.
+                      description: "A topology spread constraint for installer placement.\n\
+                        \nThe official type, with the API server's own defaults and\
+                        \ ranges restored on the\nthree fields that are easy to get\
+                        \ wrong. The remaining fields \u2014 including\n``matchLabelKeys``,\
+                        \ ``nodeAffinityPolicy`` and ``nodeTaintsPolicy`` \u2014 are\
+                        \ the\nupstream ones and are passed to the scheduler unchanged."
                       properties:
+                        labelSelector:
+                          description: "A label selector is a label query over a set\
+                            \ of resources. The result of matchLabels and matchExpressions\
+                            \ are ANDed. An empty label selector matches all objects.\
+                            \ A null label selector matches no objects.\n\nAttributes:\n\
+                            \  openapi_types (dict): The key is attribute name\n \
+                            \                       and the value is attribute type.\n\
+                            \  attribute_map (dict): The key is attribute name\n \
+                            \                       and the value is json key in definition."
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              title: Matchexpressions
+                              items:
+                                description: "A label selector requirement is a selector\
+                                  \ that contains values, a key, and an operator that\
+                                  \ relates the key and values.\n\nAttributes:\n \
+                                  \ openapi_types (dict): The key is attribute name\n\
+                                  \                        and the value is attribute\
+                                  \ type.\n  attribute_map (dict): The key is attribute\
+                                  \ name\n                        and the value is\
+                                  \ json key in definition."
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    title: Key
+                                    type: string
+                                  operator:
+                                    description: operator represents a key's relationship
+                                      to a set of values. Valid operators are In,
+                                      NotIn, Exists and DoesNotExist.
+                                    title: Operator
+                                    type: string
+                                  values:
+                                    description: values is an array of string values.
+                                      If the operator is In or NotIn, the values array
+                                      must be non-empty. If the operator is Exists
+                                      or DoesNotExist, the values array must be empty.
+                                      This array is replaced during a strategic merge
+                                      patch.
+                                    title: Values
+                                    items:
+                                      type: string
+                                    type: array
+                                    nullable: true
+                                required: *id017
+                                title: V1LabelSelectorRequirement
+                                type: object
+                              type: array
+                              nullable: true
+                            matchLabels:
+                              description: matchLabels is a map of {key,value} pairs.
+                                A single {key,value} in the matchLabels map is equivalent
+                                to an element of matchExpressions, whose key field
+                                is "key", the operator is "In", and the values array
+                                contains only "value". The requirements are ANDed.
+                              title: Matchlabels
+                              additionalProperties:
+                                type: string
+                              type: object
+                              nullable: true
+                          title: V1LabelSelector
+                          type: object
+                          nullable: true
+                        matchLabelKeys:
+                          description: MatchLabelKeys is a set of pod label keys to
+                            select the pods over which spreading will be calculated.
+                            The keys are used to lookup values from the incoming pod
+                            labels, those key-value labels are ANDed with labelSelector
+                            to select the group of existing pods over which spreading
+                            will be calculated for the incoming pod. The same key
+                            is forbidden to exist in both MatchLabelKeys and LabelSelector.
+                            MatchLabelKeys cannot be set when LabelSelector isn't
+                            set. Keys that don't exist in the incoming pod labels
+                            will be ignored. A null or empty list means only match
+                            against labelSelector.  This is a beta field and requires
+                            the MatchLabelKeysInPodTopologySpread feature gate to
+                            be enabled (enabled by default).
+                          title: Matchlabelkeys
+                          items:
+                            type: string
+                          type: array
+                          nullable: true
                         maxSkew:
                           minimum: 1
                           title: Maxskew
                           type: integer
+                        minDomains:
+                          description: 'MinDomains indicates a minimum number of eligible
+                            domains. When the number of eligible domains with matching
+                            topology keys is less than minDomains, Pod Topology Spread
+                            treats "global minimum" as 0, and then the calculation
+                            of Skew is performed. And when the number of eligible
+                            domains with matching topology keys equals or greater
+                            than minDomains, this value has no effect on scheduling.
+                            As a result, when the number of eligible domains is less
+                            than minDomains, scheduler won''t schedule more than maxSkew
+                            Pods to those domains. If value is nil, the constraint
+                            behaves as if MinDomains is equal to 1. Valid values are
+                            integers greater than 0. When value is not nil, WhenUnsatisfiable
+                            must be DoNotSchedule.  For example, in a 3-zone cluster,
+                            MaxSkew is set to 2, MinDomains is set to 5 and pods with
+                            the same labelSelector spread as 2/2/2: | zone1 | zone2
+                            | zone3 | |  P P  |  P P  |  P P  | The number of domains
+                            is less than 5(MinDomains), so "global minimum" is treated
+                            as 0. In this situation, new pod with the same labelSelector
+                            cannot be scheduled, because computed skew will be 3(3
+                            - 0) if new Pod is scheduled to any of the three zones,
+                            it will violate MaxSkew.'
+                          title: Mindomains
+                          type: integer
+                          nullable: true
+                        nodeAffinityPolicy:
+                          description: 'NodeAffinityPolicy indicates how we will treat
+                            Pod''s nodeAffinity/nodeSelector when calculating pod
+                            topology spread skew. Options are: - Honor: only nodes
+                            matching nodeAffinity/nodeSelector are included in the
+                            calculations. - Ignore: nodeAffinity/nodeSelector are
+                            ignored. All nodes are included in the calculations.  If
+                            this value is nil, the behavior is equivalent to the Honor
+                            policy.'
+                          title: Nodeaffinitypolicy
+                          type: string
+                          nullable: true
+                        nodeTaintsPolicy:
+                          description: 'NodeTaintsPolicy indicates how we will treat
+                            node taints when calculating pod topology spread skew.
+                            Options are: - Honor: nodes without taints, along with
+                            tainted nodes for which the incoming pod has a toleration,
+                            are included. - Ignore: node taints are ignored. All nodes
+                            are included.  If this value is nil, the behavior is equivalent
+                            to the Ignore policy.'
+                          title: Nodetaintspolicy
+                          type: string
+                          nullable: true
                         topologyKey:
                           minLength: 1
                           title: Topologykey
                           type: string
                         whenUnsatisfiable:
                           default: DoNotSchedule
-                          enum:
-                          - DoNotSchedule
-                          - ScheduleAnyway
                           title: Whenunsatisfiable
                           type: string
-                        labelSelector:
-                          description: A label selector used by a topology spread
-                            constraint.
-                          properties:
-                            matchLabels:
-                              title: Matchlabels
-                              additionalProperties:
-                                type: string
-                              type: object
-                              nullable: true
-                            matchExpressions:
-                              title: Matchexpressions
-                              items:
-                                description: One predicate of a label selector.
-                                properties:
-                                  key:
-                                    minLength: 1
-                                    title: Key
-                                    type: string
-                                  operator:
-                                    enum:
-                                    - In
-                                    - NotIn
-                                    - Exists
-                                    - DoesNotExist
-                                    title: Operator
-                                    type: string
-                                  values:
-                                    title: Values
-                                    items:
-                                      type: string
-                                    type: array
-                                    nullable: true
-                                required:
-                                - key
-                                - operator
-                                title: LabelSelectorRequirement
-                                type: object
-                              type: array
-                              nullable: true
-                          title: LabelSelector
-                          type: object
-                          nullable: true
-                        minDomains:
-                          title: Mindomains
-                          type: integer
-                          nullable: true
                       required:
                       - maxSkew
                       - topologyKey
@@ -2262,16 +3643,66 @@ spec:
                     title: Bundledir
                     type: string
                   resources:
-                    description: Container resource requests and limits, passed through
-                      unchanged.
+                    description: 'Container resource requests and limits, from the
+                      official Kubernetes type.
+
+
+                      ``claims`` belongs to the scheduler, which never sees a static
+                      Pod: kubelet
+
+                      starts it from a file and cannot resolve a claim. It is refused
+                      rather than
+
+                      written into a manifest that would silently never take effect.'
                     properties:
+                      claims:
+                        description: Claims lists the names of resources, defined
+                          in spec.resourceClaims, that are used by this container.  This
+                          field depends on the DynamicResourceAllocation feature gate.  This
+                          field is immutable. It can only be set for containers.
+                        title: Claims
+                        items:
+                          description: "ResourceClaim references one entry in PodSpec.ResourceClaims.\n\
+                            \nAttributes:\n  openapi_types (dict): The key is attribute\
+                            \ name\n                        and the value is attribute\
+                            \ type.\n  attribute_map (dict): The key is attribute\
+                            \ name\n                        and the value is json\
+                            \ key in definition."
+                          properties:
+                            name:
+                              description: Name must match the name of one entry in
+                                pod.spec.resourceClaims of the Pod where this field
+                                is used. It makes that resource available inside a
+                                container.
+                              title: Name
+                              type: string
+                            request:
+                              description: Request is the name chosen for a request
+                                in the referenced claim. If empty, everything from
+                                the claim is made available, otherwise only the result
+                                of this request.
+                              title: Request
+                              type: string
+                              nullable: true
+                          required: *id011
+                          title: CoreV1ResourceClaim
+                          type: object
+                        type: array
+                        nullable: true
                       limits:
+                        description: 'Limits describes the maximum amount of compute
+                          resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                         title: Limits
                         additionalProperties:
                           type: string
                         type: object
                         nullable: true
                       requests:
+                        description: 'Requests describes the minimum amount of compute
+                          resources required. If Requests is omitted for a container,
+                          it defaults to Limits if that is explicitly specified, otherwise
+                          to an implementation-defined value. Requests cannot exceed
+                          Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                         title: Requests
                         additionalProperties:
                           type: string

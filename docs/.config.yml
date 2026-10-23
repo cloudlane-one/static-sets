@@ -8,6 +8,11 @@ site_dir: ../dist/docs
 use_directory_urls: false
 dev_addr: 127.0.0.1:9000
 
+# Adds ../app to the import path so the generated command reference can import the
+# entry points that live there rather than in the installed package.
+hooks:
+  - _hooks.py
+
 nav:
   - Home: index.md
   - Explanation:
@@ -22,6 +27,7 @@ nav:
       - ref-translation.md
       - ref-installation.md
       - ref-deferred-features.md
+      - ref-cli.md
       - Python API: ref-python-api.md
   - Development:
       - how-to-contribute.md
@@ -115,6 +121,9 @@ plugins:
   - search
   - markdown-exec
   - section-index
+  - mkdocs-typer2:
+      pretty: true
+      engine: native
   - macros:
       module_name: _macros
 

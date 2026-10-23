@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 import base64
-import json
-from collections.abc import Mapping
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from kubernetes.client import V1ConfigMap, V1ObjectMeta, V1Pod, V1Secret
+from typer.testing import CliRunner
 
+from static_sets.api import ApiRequestError, KubernetesClient
 from static_sets.errors import StaticSetsError
+from static_sets.installer import ApiUnavailableError
+from static_sets.models import StaticSet
 from static_sets.naming import COMPONENT_LABEL, PLACEMENT_COMPONENT, PLACEMENT_LABEL, SET_LABEL
+from static_sets.naming import placement_configmap_name, placement_identity
 import static_sets_installer as installer_cli
 from static_sets_installer import (
+    Action,
     ClusterApi,
+    app,
     assignment_from_environment,
-    main,
+    run,
 )
 
 UID = "0f9a4b6c-1111-2222-3333-444455556666"
@@ -24,47 +31,217 @@ NAMESPACE = "edge"
 SET_NAME = "web"
 
 
-class FakeJsonClient:
-    """A JSON client that answers from a path-keyed table and records calls."""
+class FakeCore:
+    """The core API group, answering from the cluster's typed collections."""
 
-    def __init__(self, answers: Mapping[str, Any] | None = None) -> None:
-        """Build the client.
+    def __init__(self, cluster: FakeCluster) -> None:
+        self.cluster = cluster
 
-        Args:
-            answers: Path to response mapping; a missing path answers ``{}``.
-        """
-        self.answers = dict(answers or {})
-        self.calls: list[tuple[str, str, Any]] = []
-
-    def json(
-        self,
-        method: str,
-        path: str,
-        *,
-        body: Any = None,
-        params: Mapping[str, str] | None = None,
-        missing: Any = None,
-    ) -> Any:
-        """Answer one call, honouring the caller's ``missing`` sentinel.
+    def read_namespaced_config_map(self, name: str, namespace: str, **kwargs: Any) -> V1ConfigMap:
+        """Read a ConfigMap.
 
         Args:
-            method: The HTTP method.
-            path: The API path.
-            body: The request body.
-            params: Query parameters.
-            missing: The value to return when the path is unknown.
+            name: The ConfigMap's name.
+            namespace: The namespace.
+            **kwargs: Further client arguments.
 
         Returns:
-            The recorded answer.
+            The ConfigMap.
+
+        Raises:
+            ApiUnavailableError: If the fake is configured as unreachable.
+            ApiRequestError: If it does not exist.
         """
-        self.calls.append((method, path, body))
-        if method == "POST":
-            created = f"{path.rstrip('/')}/{body['metadata']['name']}"
-            self.answers[created] = body
-            return body
-        if path in self.answers:
-            return self.answers[path]
-        return missing
+        del namespace, kwargs
+        if self.cluster.unavailable:
+            raise ApiUnavailableError("connection refused")
+        record = self.cluster.config_maps.get(name)
+        if record is None:
+            raise ApiRequestError(f"ConfigMap {name} does not exist", status=404)
+        return record
+
+    def read_namespaced_secret(self, name: str, namespace: str, **kwargs: Any) -> V1Secret:
+        """Read a Secret.
+
+        Args:
+            name: The Secret's name.
+            namespace: The namespace.
+            **kwargs: Further client arguments.
+
+        Returns:
+            The Secret.
+
+        Raises:
+            ApiUnavailableError: If the fake is configured as unreachable.
+            ApiRequestError: If it does not exist.
+        """
+        del namespace, kwargs
+        if self.cluster.unavailable:
+            raise ApiUnavailableError("connection refused")
+        record = self.cluster.secrets.get(name)
+        if record is None:
+            raise ApiRequestError(f"Secret {name} does not exist", status=404)
+        return record
+
+    def create_namespaced_config_map(
+        self, namespace: str, body: V1ConfigMap, **kwargs: Any
+    ) -> None:
+        """Record a ConfigMap creation.
+
+        Args:
+            namespace: The namespace.
+            body: The object.
+            **kwargs: Further client arguments.
+        """
+        del namespace, kwargs
+        self.cluster.record(body)
+
+    def replace_namespaced_config_map(
+        self, name: str, namespace: str, body: V1ConfigMap, **kwargs: Any
+    ) -> None:
+        """Record a ConfigMap replacement.
+
+        Args:
+            name: The ConfigMap's name, which the generated signature puts first.
+            namespace: The namespace.
+            body: The object.
+            **kwargs: Further client arguments.
+        """
+        del namespace, kwargs
+        assert body.metadata is not None and body.metadata.name == name
+        self.cluster.record(body)
+
+    def patch_namespaced_pod(self, name: str, namespace: str, body: V1Pod, **kwargs: Any) -> None:
+        """Record a Pod patch.
+
+        Args:
+            name: The Pod's name.
+            namespace: The namespace.
+            body: The patch.
+            **kwargs: Further client arguments.
+
+        Raises:
+            ApiUnavailableError: If the fake is configured as unreachable.
+        """
+        del kwargs
+        if self.cluster.unavailable:
+            raise ApiUnavailableError("connection refused")
+        self.cluster.patched.append((namespace, name, body))
+
+    def delete_namespaced_pod(self, name: str, namespace: str, **kwargs: Any) -> None:
+        """Record a Pod deletion.
+
+        Args:
+            name: The Pod's name.
+            namespace: The namespace.
+            **kwargs: Further client arguments.
+        """
+        self.cluster.deleted.append((namespace, name, kwargs.get("grace_period_seconds", 0)))
+
+
+class FakeCustom:
+    """The custom-objects API group, serving the StaticSet under test."""
+
+    def __init__(self, cluster: FakeCluster) -> None:
+        self.cluster = cluster
+
+    def get_namespaced_custom_object(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        name: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Return the served StaticSet's wire form.
+
+        Args:
+            group: The API group.
+            version: The API version.
+            namespace: The namespace.
+            plural: The collection name.
+            name: The object's name.
+            **kwargs: Further client arguments.
+
+        Returns:
+            The wire-shaped resource.
+
+        Raises:
+            ApiUnavailableError: If the fake is configured as unreachable.
+        """
+        del group, version, namespace, plural, name, kwargs
+        if self.cluster.unavailable:
+            raise ApiUnavailableError("connection refused")
+        assert self.cluster.static_set is not None, "the fake has no StaticSet to serve"
+        return self.cluster.static_set
+
+
+class FakeCluster:
+    """A cluster that serves typed objects and records what the installer writes.
+
+    It stands in for :class:`~static_sets.api.KubernetesClient`, exposing the same
+    ``core`` and ``custom`` API groups, so a test describes the objects the API
+    would return rather than an HTTP conversation.
+    """
+
+    def __init__(
+        self,
+        static_set: dict[str, Any] | None = None,
+        *,
+        config_maps: dict[str, V1ConfigMap] | None = None,
+        secrets: dict[str, V1Secret] | None = None,
+    ) -> None:
+        """Build the fake.
+
+        Args:
+            static_set: The wire-shaped StaticSet to serve, or ``None`` for a 404.
+            config_maps: ConfigMaps by name.
+            secrets: Secrets by name.
+        """
+        self.static_set = static_set
+        self.config_maps = dict(config_maps or {})
+        self.secrets = dict(secrets or {})
+        self.applied: list[Any] = []
+        self.patched: list[tuple[str, str, Any]] = []
+        self.deleted: list[tuple[str, str, int]] = []
+        self.unavailable = False
+        self.core = FakeCore(self)
+        self.custom = FakeCustom(self)
+
+    def record(self, obj: Any) -> None:
+        """Record an applied object.
+
+        Args:
+            obj: The object that was written.
+        """
+        self.applied.append(obj)
+        if isinstance(obj, V1ConfigMap) and obj.metadata and obj.metadata.name:
+            self.config_maps[obj.metadata.name] = obj
+
+
+def as_client(cluster: FakeCluster) -> KubernetesClient:
+    """Type a fake cluster as the client the installer takes.
+
+    Args:
+        cluster: The fake.
+
+    Returns:
+        The same object, seen as a client.
+    """
+    return cast(KubernetesClient, cluster)
+
+
+def cluster_api(cluster: FakeCluster) -> ClusterApi:
+    """Wrap a fake cluster in the byte-oriented placement API.
+
+    Args:
+        cluster: The fake.
+
+    Returns:
+        The adapter under test.
+    """
+    return ClusterApi(as_client(cluster))
 
 
 def environment(temp_roots: tuple[Path, Path], **overrides: str) -> dict[str, str]:
@@ -103,8 +280,6 @@ def static_set_body(temp_roots: tuple[Path, Path], **spec_overrides: Any) -> dic
     Returns:
         The wire-shaped body.
     """
-    from static_sets.models import StaticSet
-
     manifests, bundle = temp_roots
     installer = {
         "image": "registry.test/static-sets:1",
@@ -131,18 +306,6 @@ def static_set_body(temp_roots: tuple[Path, Path], **spec_overrides: Any) -> dic
         }
     )
     return resource.model_dump(mode="json", by_alias=True)
-
-
-def assignment_environment(temp_roots: tuple[Path, Path]) -> dict[str, str]:
-    """Return the environment as the operator would inject it.
-
-    Args:
-        temp_roots: The (manifests, bundle) pair from the fixture.
-
-    Returns:
-        The environment.
-    """
-    return environment(temp_roots)
 
 
 def test_assignment_reads_every_required_variable(temp_roots: tuple[Path, Path]) -> None:
@@ -183,99 +346,53 @@ def derived_identity() -> str:
     Returns:
         The placement identity.
     """
-    from static_sets.naming import placement_identity
-
     return placement_identity(UID, "node-a")
 
 
-def static_set_path() -> str:
-    """Return the REST path of the test StaticSet.
-
-    Returns:
-        The path.
-    """
-    return f"/apis/staticsets.cloudlane.dev/v1/namespaces/{NAMESPACE}/staticsets/{SET_NAME}"
-
-
-def config_map_path(name: str) -> str:
-    """Return the REST path of a ConfigMap.
-
-    Args:
-        name: The ConfigMap's name.
-
-    Returns:
-        The path.
-    """
-    return f"/api/v1/namespaces/{NAMESPACE}/configmaps/{name}"
-
-
-def test_cluster_api_reads_and_validates_the_static_set() -> None:
+def test_cluster_api_reads_and_validates_the_static_set(temp_roots: tuple[Path, Path]) -> None:
     """The StaticSet is validated into the typed model before use."""
-    client = FakeJsonClient({static_set_path(): static_set_body_fixture()})
+    cluster = FakeCluster(static_set_body(temp_roots))
 
-    resource = ClusterApi(client).get_static_set(NAMESPACE, SET_NAME)
+    resource = cluster_api(cluster).get_static_set(NAMESPACE, SET_NAME)
 
     assert resource.spec.replicas == 1
     assert resource.spec.mode.value == "Deployment"
 
 
-def static_set_body_fixture() -> dict[str, Any]:
-    """Return a minimal valid StaticSet body for the API tests.
-
-    Returns:
-        The wire-shaped body.
-    """
-    return {
-        "apiVersion": "staticsets.cloudlane.dev/v1",
-        "kind": "StaticSet",
-        "metadata": {"name": SET_NAME, "namespace": NAMESPACE, "uid": UID},
-        "spec": {
-            "mode": "Deployment",
-            "replicas": 1,
-            "template": {"spec": {"containers": [{"name": "app", "image": "img:1"}]}},
-            "installer": {"image": "img:1"},
-        },
-    }
-
-
 def test_cluster_api_decodes_config_map_data_and_binary_data() -> None:
     """Text and base64 entries of a ConfigMap become bytes."""
-    client = FakeJsonClient(
-        {
-            config_map_path("cfg"): {
-                "data": {"a": "text"},
-                "binaryData": {"b": base64.b64encode(b"\x00\x01").decode()},
-            }
+    cluster = FakeCluster(
+        config_maps={
+            "cfg": V1ConfigMap(
+                data={"a": "text"},
+                binary_data={"b": base64.b64encode(b"\x00\x01").decode()},
+            )
         }
     )
 
-    data = ClusterApi(client).get_config_map(NAMESPACE, "cfg")
+    data = cluster_api(cluster).get_config_map(NAMESPACE, "cfg")
 
     assert data == {"a": b"text", "b": b"\x00\x01"}
 
 
 def test_cluster_api_reports_an_absent_config_map() -> None:
     """A 404 becomes ``None`` rather than an empty mapping."""
-    client = FakeJsonClient()
-
-    assert ClusterApi(client).get_config_map(NAMESPACE, "cfg") is None
+    assert cluster_api(FakeCluster()).get_config_map(NAMESPACE, "cfg") is None
 
 
 def test_cluster_api_decodes_secret_data() -> None:
     """Secret values are base64 and are decoded to bytes."""
-    client = FakeJsonClient(
-        {f"/api/v1/namespaces/{NAMESPACE}/secrets/sec": {"data": {"token": "czNjcjN0"}}}
-    )
+    cluster = FakeCluster(secrets={"sec": V1Secret(data={"token": "czNjcjN0"})})
 
-    data = ClusterApi(client).get_secret(NAMESPACE, "sec")
+    data = cluster_api(cluster).get_secret(NAMESPACE, "sec")
 
     assert data == {"token": b"s3cr3t"}
 
 
 def test_cluster_api_creates_then_updates_a_placement() -> None:
-    """The acknowledgment object is created on first publish and replaced later."""
-    client = FakeJsonClient()
-    api = ClusterApi(client)
+    """The acknowledgment object is created on first publish and updated later."""
+    cluster = FakeCluster()
+    api = cluster_api(cluster)
 
     api.publish_placement(NAMESPACE, "web-placement-id1", {"placement": "id1"}, static_set="web")
     api.publish_placement(
@@ -285,88 +402,93 @@ def test_cluster_api_creates_then_updates_a_placement() -> None:
         static_set="web",
     )
 
-    methods = [method for method, path, _ in client.calls]
-    assert methods == ["GET", "POST", "GET", "PUT"]
-    created = client.calls[1][1]
-    assert created == f"/api/v1/namespaces/{NAMESPACE}/configmaps"
-    assert client.calls[3][1] == config_map_path("web-placement-id1")
+    assert len(cluster.applied) == 2
+    assert cluster.config_maps["web-placement-id1"].data == {"placement": "id1", "state": "Removed"}
 
 
 def test_cluster_api_reads_a_published_placement() -> None:
     """The payload the operator published is returned as a plain mapping."""
-    client = FakeJsonClient({config_map_path("web-placement-id1"): {"data": {"cleanup": "true"}}})
+    cluster = FakeCluster(config_maps={"rec": V1ConfigMap(data={"cleanup": "true"})})
 
-    payload = ClusterApi(client).get_placement(NAMESPACE, "web-placement-id1")
+    payload = cluster_api(cluster).get_placement(NAMESPACE, "rec")
 
     assert payload == {"cleanup": "true"}
 
 
 def test_release_self_clears_the_finalizer_and_deletes_the_pod() -> None:
     """A finished cleanup worker removes its own finalizer and itself."""
-    client = FakeJsonClient()
-    api = ClusterApi(client)
+    cluster = FakeCluster()
 
-    api.release_self(NAMESPACE, "web-cleanup-id1")
+    cluster_api(cluster).release_self(NAMESPACE, "web-cleanup-id1")
 
-    assert [method for method, _, _ in client.calls] == ["PATCH", "DELETE"]
-    assert client.calls[0][2] == {"metadata": {"finalizers": []}}
+    assert [name for _, name, _ in cluster.patched] == ["web-cleanup-id1"]
+    assert cluster.patched[0][2] == V1Pod(metadata=V1ObjectMeta(finalizers=[]))
+    assert cluster.deleted == [(NAMESPACE, "web-cleanup-id1", 0)]
 
 
 def test_release_self_tolerates_a_failure() -> None:
     """Failing to release itself must not fail the cleanup."""
-    from static_sets.installer import ApiUnavailableError
+    cluster = FakeCluster()
+    cluster.unavailable = True
 
-    class Broken(FakeJsonClient):
-        def json(self, method: str, path: str, **kwargs: Any) -> Any:
-            self.calls.append((method, path, kwargs.get("body")))
-            raise ApiUnavailableError("gone")
-
-    ClusterApi(Broken()).release_self(NAMESPACE, "pod")
+    cluster_api(cluster).release_self(NAMESPACE, "pod")
 
 
-def serving_transport(
-    temp_roots: tuple[Path, Path],
-    *,
-    spec_overrides: Mapping[str, Any] | None = None,
-) -> tuple[Any, list[tuple[str, str]]]:
-    """Return a transport serving the installer's reads, and its call log.
+def test_the_command_line_parses_the_documented_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Typer declaration is the CLI: defaults and flags are what it says."""
+    captured: dict[str, Any] = {}
+
+    def fake_run(action: Action, **kwargs: Any) -> int:
+        captured.update(action=action, **kwargs)
+        return 0
+
+    monkeypatch.setattr(installer_cli, "run", fake_run)
+
+    result = CliRunner().invoke(
+        app,
+        ["cleanup", "--timeout", "2", "--interval", "5", "--workload-running"],
+    )
+
+    assert result.exit_code == 0
+    assert captured == {
+        "action": Action.CLEANUP,
+        "timeout": 2.0,
+        "interval": 5.0,
+        "workload_running": True,
+    }
+
+
+def test_the_command_line_rejects_an_unknown_action() -> None:
+    """An action outside the two the installer has is refused by the parser."""
+    result = CliRunner().invoke(app, ["install"])
+
+    assert result.exit_code == 2
+
+
+def serving_cluster(temp_roots: tuple[Path, Path], **spec_overrides: Any) -> FakeCluster:
+    """Return a cluster serving the installer's reads.
 
     Args:
         temp_roots: The (manifests, bundle) pair from the fixture.
-        spec_overrides: Extra spec fields for the served StaticSet.
+        **spec_overrides: Extra spec fields for the served StaticSet.
 
     Returns:
-        The transport and the list it records calls into.
+        The fake cluster.
     """
-    body = static_set_body(temp_roots, **dict(spec_overrides or {}))
-    config_map = {"data": {"app.conf": "greeting=hello\n"}}
-    calls: list[tuple[str, str]] = []
-
-    def transport(method: str, url: str, payload: bytes | None, headers: Any) -> tuple[int, bytes]:
-        del payload, headers
-        path = url.split("?")[0].replace("https://10.0.0.1:443", "")
-        calls.append((method, path))
-        if path == static_set_path():
-            return 200, json.dumps(body).encode()
-        if path == config_map_path("web-conf"):
-            return 200, json.dumps(config_map).encode()
-        if path.startswith(config_map_path("")):
-            if method == "POST":
-                return 201, b"{}"
-            return 404, b"{}"
-        return 200, b"{}"
-
-    return transport, calls
+    return FakeCluster(
+        static_set_body(temp_roots, **dict(spec_overrides)),
+        config_maps={"web-conf": V1ConfigMap(data={"app.conf": "greeting=hello\n"})},
+    )
 
 
 def test_main_reconciles_a_placement_end_to_end(temp_roots: tuple[Path, Path]) -> None:
     """The command installs the static Pod and acknowledges it."""
-    transport, calls = serving_transport(temp_roots)
+    cluster = serving_cluster(temp_roots)
 
-    status = main(
-        [],
+    status = run(
+        Action.RECONCILE,
         environ=environment(temp_roots),
-        transport=transport,
+        client=as_client(cluster),
         now="2026-10-12T10:00:00+00:00",
         interval=0.0,
     )
@@ -376,18 +498,24 @@ def test_main_reconciles_a_placement_end_to_end(temp_roots: tuple[Path, Path]) -
     written = list(manifests.glob("*.yaml"))
     assert len(written) == 1
     assert written[0].name.startswith("web-")
-    assert any(method == "POST" for method, _ in calls)
+    acknowledgments = [item for item in cluster.applied if isinstance(item, V1ConfigMap)]
+    assert acknowledgments
+    assert (acknowledgments[0].data or {})["state"] == "Installed"
 
 
 def test_main_treats_an_unreachable_api_as_a_non_failure(
     temp_roots: tuple[Path, Path],
 ) -> None:
     """Being offline is a state to report, not a crash: the local state is kept."""
+    cluster = serving_cluster(temp_roots)
+    cluster.unavailable = True
 
-    def broken(*_: Any) -> tuple[int, bytes]:
-        raise OSError("no route to host")
-
-    status = main([], environ=environment(temp_roots), transport=broken, interval=0.0)
+    status = run(
+        Action.RECONCILE,
+        environ=environment(temp_roots),
+        client=as_client(cluster),
+        interval=0.0,
+    )
 
     assert status == 0
     manifests, _ = temp_roots
@@ -399,21 +527,19 @@ def test_main_reports_an_incomplete_environment(temp_roots: tuple[Path, Path]) -
     incomplete = environment(temp_roots)
     del incomplete["STATIC_SETS_UID"]
 
-    assert main([], environ=incomplete) == 2
+    assert run(Action.RECONCILE, environ=incomplete) == 2
 
 
 def test_main_fails_closed_when_images_cannot_be_verified(
     temp_roots: tuple[Path, Path],
 ) -> None:
     """A revision whose images are unconfirmed must not be published."""
-    transport, _ = serving_transport(
-        temp_roots, spec_overrides={"offline": {"imageProvisioning": "VerifiedBeforeInstall"}}
-    )
+    cluster = serving_cluster(temp_roots, offline={"imageProvisioning": "VerifiedBeforeInstall"})
 
-    status = main(
-        [],
+    status = run(
+        Action.RECONCILE,
         environ=environment(temp_roots),
-        transport=transport,
+        client=as_client(cluster),
         now="2026-10-12T10:00:00+00:00",
         interval=0.0,
     )
@@ -423,69 +549,67 @@ def test_main_fails_closed_when_images_cannot_be_verified(
     assert list(manifests.glob("*.yaml")) == []
 
 
+def cleanup_payload() -> dict[str, str]:
+    """Return the cleanup intent the operator would publish.
+
+    Returns:
+        The intent's data.
+    """
+    identity = derived_identity()
+    return {
+        "cleanup": "true",
+        "placement": identity,
+        "podName": f"web-{identity}",
+        "staticSet": SET_NAME,
+        "uid": UID,
+        "namespace": NAMESPACE,
+        "node": "node-a",
+        "generation": "3",
+        "reason": "ScaledDown",
+        "removeConfiguration": "true",
+        "requestedAt": "2026-10-12T10:00:00Z",
+    }
+
+
 def test_main_runs_a_cleanup_and_releases_itself(temp_roots: tuple[Path, Path]) -> None:
     """A cleanup worker removes the workload, acknowledges, and clears its finalizer."""
-    transport, _ = serving_transport(temp_roots)
-    main(
-        [],
+    cluster = serving_cluster(temp_roots)
+    run(
+        Action.RECONCILE,
         environ=environment(temp_roots),
-        transport=transport,
+        client=as_client(cluster),
         now="2026-10-12T10:00:00+00:00",
         interval=0.0,
     )
     manifests, _ = temp_roots
     assert list(manifests.glob("*.yaml"))
 
-    serving, calls = serving_transport(temp_roots)
     identity = derived_identity()
+    record = cluster.config_maps[placement_configmap_name(SET_NAME, identity)]
+    record.data = cleanup_payload()
 
-    def cleanup_transport(
-        method: str, url: str, payload: bytes | None, headers: Any
-    ) -> tuple[int, bytes]:
-        path = url.split("?")[0].replace("https://10.0.0.1:443", "")
-        if path.startswith(config_map_path("web-placement-")):
-            if method == "POST":
-                return 201, b"{}"
-            return 200, json.dumps(
-                {
-                    "data": {
-                        "cleanup": "true",
-                        "placement": identity,
-                        "podName": f"web-{identity}",
-                        "staticSet": SET_NAME,
-                        "uid": UID,
-                        "namespace": NAMESPACE,
-                        "node": "node-a",
-                        "generation": "3",
-                        "reason": "ScaledDown",
-                        "removeConfiguration": "true",
-                        "requestedAt": "2026-10-12T10:00:00Z",
-                    }
-                }
-            ).encode()
-        return serving(method, url, payload, headers)
-
-    status = main(
-        ["cleanup"],
+    status = run(
+        Action.CLEANUP,
         environ=environment(temp_roots, STATIC_SETS_PLACEMENT=identity),
-        transport=cleanup_transport,
+        client=as_client(cluster),
         now="2026-10-12T10:00:00+00:00",
     )
 
     assert status == 0
     assert list(manifests.glob("*.yaml")) == []
-    assert ("PATCH", f"/api/v1/namespaces/{NAMESPACE}/pods/web-installer-abc") in calls
+    assert [name for _, name, _ in cluster.patched] == ["web-installer-abc"]
+    assert cluster.deleted == [(NAMESPACE, "web-installer-abc", 0)]
 
 
 def test_main_with_a_running_workload_keeps_its_configuration(
     temp_roots: tuple[Path, Path],
 ) -> None:
     """A worker told the workload is still running does not delete its files."""
-    transport, _ = serving_transport(temp_roots)
-    main(
-        [],
+    cluster = serving_cluster(temp_roots)
+    run(
+        Action.RECONCILE,
         environ=environment(temp_roots),
-        transport=transport,
+        client=as_client(cluster),
         now="2026-10-12T10:00:00+00:00",
         interval=0.0,
     )
@@ -494,37 +618,15 @@ def test_main_with_a_running_workload_keeps_its_configuration(
     assert revisions
 
     identity = derived_identity()
-    serving, _ = serving_transport(temp_roots)
+    record = cluster.config_maps[placement_configmap_name(SET_NAME, identity)]
+    record.data = cleanup_payload()
 
-    def cleanup_transport(
-        method: str, url: str, payload: bytes | None, headers: Any
-    ) -> tuple[int, bytes]:
-        path = url.split("?")[0].replace("https://10.0.0.1:443", "")
-        if path.startswith(config_map_path("web-placement-")):
-            return 200, json.dumps(
-                {
-                    "data": {
-                        "cleanup": "true",
-                        "placement": identity,
-                        "podName": "web-id1",
-                        "staticSet": SET_NAME,
-                        "uid": UID,
-                        "namespace": NAMESPACE,
-                        "node": "node-a",
-                        "generation": "3",
-                        "reason": "ScaledDown",
-                        "removeConfiguration": "true",
-                        "requestedAt": "2026-10-12T10:00:00Z",
-                    }
-                }
-            ).encode()
-        return serving(method, url, payload, headers)
-
-    status = main(
-        ["cleanup", "--workload-running"],
+    status = run(
+        Action.CLEANUP,
         environ=environment(temp_roots, STATIC_SETS_PLACEMENT=identity),
-        transport=cleanup_transport,
+        client=as_client(cluster),
         now="2026-10-12T10:00:00+00:00",
+        workload_running=True,
     )
 
     assert status == 0
@@ -534,7 +636,6 @@ def test_main_with_a_running_workload_keeps_its_configuration(
 
 def test_the_module_entry_point_runs_the_command(tmp_path: Path) -> None:
     """``python -m static_sets_installer`` is the documented way to start it."""
-    import os
     import subprocess
     import sys
 
@@ -563,13 +664,14 @@ def test_a_published_placement_carries_the_labels_the_operator_selects_by() -> N
     now take the keys from the same module, and this pins that the record really is
     written with them.
     """
-    client = FakeJsonClient()
-    api = ClusterApi(client)
+    cluster = FakeCluster()
 
-    api.publish_placement(NAMESPACE, "web-placement-id1", {"placement": "id1"}, static_set="web")
+    cluster_api(cluster).publish_placement(
+        NAMESPACE, "web-placement-id1", {"placement": "id1"}, static_set="web"
+    )
 
-    created = client.calls[1][2]
-    labels = created["metadata"]["labels"]
+    written = cluster.applied[0]
+    labels = written.metadata.labels
     assert labels[SET_LABEL] == "web"
     assert labels[COMPONENT_LABEL] == PLACEMENT_COMPONENT
     assert labels[PLACEMENT_LABEL] == "id1"
@@ -577,20 +679,21 @@ def test_a_published_placement_carries_the_labels_the_operator_selects_by() -> N
 
 def test_a_republished_placement_keeps_the_labels_the_operator_wrote() -> None:
     """An acknowledgment merges into the record instead of replacing its labels."""
-    existing = {
-        "metadata": {
-            "labels": {"staticsets.cloudlane.dev/set": "web", "kept": "yes"},
-            "annotations": {"note": "from the operator"},
-        }
-    }
-    client = FakeJsonClient({config_map_path("web-placement-id1"): existing})
-    api = ClusterApi(client)
+    existing = V1ConfigMap(
+        metadata=V1ObjectMeta(
+            name="web-placement-id1",
+            labels={"staticsets.cloudlane.dev/set": "web", "kept": "yes"},
+            annotations={"note": "from the operator"},
+        )
+    )
+    cluster = FakeCluster(config_maps={"web-placement-id1": existing})
+    api = cluster_api(cluster)
 
     api.publish_placement(NAMESPACE, "web-placement-id1", {"placement": "id1"}, static_set="web")
 
-    updated = client.calls[1][2]
-    assert updated["metadata"]["labels"]["kept"] == "yes"
-    assert updated["metadata"]["annotations"] == {"note": "from the operator"}
+    updated = cluster.applied[0]
+    assert updated.metadata.labels["kept"] == "yes"
+    assert updated.metadata.annotations == {"note": "from the operator"}
 
 
 def test_the_installer_keeps_reconciling_until_it_is_stopped(
@@ -603,7 +706,7 @@ def test_the_installer_keeps_reconciling_until_it_is_stopped(
     to look like a stuck one. The pass runs, then the loop waits the interval, and
     being stopped is a clean exit rather than a failure.
     """
-    transport, calls = serving_transport(temp_roots)
+    cluster = serving_cluster(temp_roots)
     waited: list[float] = []
 
     def stop_after_the_wait(seconds: float) -> None:
@@ -612,16 +715,15 @@ def test_the_installer_keeps_reconciling_until_it_is_stopped(
 
     monkeypatch.setattr(installer_cli.time, "sleep", stop_after_the_wait)
 
-    status = main(
-        [],
+    status = run(
+        Action.RECONCILE,
         environ=environment(temp_roots),
-        transport=transport,
+        client=as_client(cluster),
         now="2026-10-12T10:00:00+00:00",
         interval=7.0,
     )
 
     assert status == 0
     assert waited == [7.0]
-    assert any(method == "POST" for method, _ in calls)
     manifests, _ = temp_roots
     assert list(manifests.glob("*.yaml")), "the pass ran before the loop waited"

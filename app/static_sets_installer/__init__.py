@@ -9,20 +9,27 @@ The command has two actions. ``reconcile`` compiles the StaticSet and installs t
 resulting revision on this node. ``cleanup`` carries out a pending cleanup intent
 for a placement whose installer is gone; it is what a restricted cleanup worker
 runs, and it releases its own finalizer once removal is acknowledged.
+
+The command itself is a Typer application, so its options and its generated
+reference page come from one declaration. :func:`run` is the same behaviour
+without the command line, which is what the tests drive.
 """
 
 from __future__ import annotations
 
-import argparse
 import base64
 import json
 import os
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from enum import StrEnum
+from typing import Annotated
 
-from static_sets.api import ApiRequestError, JsonClient, KubernetesClient, Transport
+import typer
+from kubernetes.client import V1ConfigMap, V1ObjectMeta, V1Pod
+
+from static_sets.api import ApiRequestError, KubernetesClient, or_none, upsert
 from static_sets.errors import NotOfflineReadyError, StaticSetsError
 from static_sets.installer import (
     ApiUnavailableError,
@@ -41,28 +48,37 @@ from static_sets.naming import (
 )
 
 __all__ = [
+    "Action",
     "ClusterApi",
+    "app",
     "assignment_from_environment",
     "main",
+    "run",
 ]
 
-STATIC_SET_PATH = "/apis/staticsets.cloudlane.dev/v1/namespaces/{namespace}/staticsets/{name}"
-"""The REST path of a StaticSet."""
 
-CONFIG_MAP_PATH = "/api/v1/namespaces/{namespace}/configmaps/{name}"
-"""The REST path of a ConfigMap."""
+DEFAULT_INTERVAL = 30.0
+"""Seconds between reconcile passes when ``--interval`` is not given."""
 
-SECRET_PATH = "/api/v1/namespaces/{namespace}/secrets/{name}"
-"""The REST path of a Secret."""
 
-POD_PATH = "/api/v1/namespaces/{namespace}/pods/{name}"
-"""The REST path of a Pod."""
+class Action(StrEnum):
+    """What the installer command should do."""
+
+    RECONCILE = "reconcile"
+    CLEANUP = "cleanup"
 
 
 class ClusterApi:
-    """The :class:`~static_sets.installer.PlacementApi` slice, against a cluster."""
+    """The :class:`~static_sets.installer.PlacementApi` slice, against a cluster.
 
-    def __init__(self, client: JsonClient) -> None:
+    The API operations themselves come from
+    :class:`~static_sets.api.KubernetesClient`, which returns the official
+    client's pydantic models. This adapter only turns those models into the
+    byte-oriented shape the installer's runtime works with, and merges the labels
+    an acknowledgment has to keep.
+    """
+
+    def __init__(self, client: KubernetesClient) -> None:
         """Bind the API to a client.
 
         Args:
@@ -84,7 +100,14 @@ class ClusterApi:
             ApiUnavailableError: If the API could not be reached.
             ApiRequestError: If the object does not exist.
         """
-        body = self.client.json("GET", STATIC_SET_PATH.format(namespace=namespace, name=name))
+        config = StaticSet._require_resource_config()
+        body = self.client.custom.get_namespaced_custom_object(
+            config.group,
+            config.version,
+            namespace,
+            config.plural,
+            name,
+        )
         return StaticSet.model_validate(body)
 
     def get_config_map(self, namespace: str, name: str) -> Mapping[str, bytes] | None:
@@ -100,15 +123,13 @@ class ClusterApi:
         Raises:
             ApiUnavailableError: If the API could not be reached.
         """
-        body = self.client.json(
-            "GET", CONFIG_MAP_PATH.format(namespace=namespace, name=name), missing={}
-        )
-        if not body:
+        record = or_none(self.client.core.read_namespaced_config_map, name, namespace)
+        if record is None:
             return None
         data: dict[str, bytes] = {
-            key: value.encode("utf-8") for key, value in (body.get("data") or {}).items()
+            key: value.encode("utf-8") for key, value in (record.data or {}).items()
         }
-        for key, value in (body.get("binaryData") or {}).items():
+        for key, value in (record.binary_data or {}).items():
             data[key] = base64.b64decode(value)
         return data
 
@@ -125,12 +146,10 @@ class ClusterApi:
         Raises:
             ApiUnavailableError: If the API could not be reached.
         """
-        body = self.client.json(
-            "GET", SECRET_PATH.format(namespace=namespace, name=name), missing={}
-        )
-        if not body:
+        record = or_none(self.client.core.read_namespaced_secret, name, namespace)
+        if record is None:
             return None
-        return {key: base64.b64decode(value) for key, value in (body.get("data") or {}).items()}
+        return {key: base64.b64decode(value) for key, value in (record.data or {}).items()}
 
     def get_placement(self, namespace: str, name: str) -> Mapping[str, str] | None:
         """Return the payload the operator published for a placement.
@@ -145,12 +164,10 @@ class ClusterApi:
         Raises:
             ApiUnavailableError: If the API could not be reached.
         """
-        body = self.client.json(
-            "GET", CONFIG_MAP_PATH.format(namespace=namespace, name=name), missing={}
-        )
-        if not body:
+        record = or_none(self.client.core.read_namespaced_config_map, name, namespace)
+        if record is None:
             return None
-        return dict(body.get("data") or {})
+        return dict(record.data or {})
 
     def publish_placement(
         self,
@@ -173,34 +190,36 @@ class ClusterApi:
             ApiUnavailableError: If the API could not be reached.
             ApiRequestError: If the write was refused.
         """
-        path = CONFIG_MAP_PATH.format(namespace=namespace, name=name)
-        existing = self.client.json("GET", path, missing={})
+        existing = or_none(self.client.core.read_namespaced_config_map, name, namespace)
         # The object the operator published carries labels it selects this record by,
         # so they are merged rather than replaced: an acknowledgment written with a
         # label set of its own is one the controller never sees.
-        published = dict((existing.get("metadata") or {}).get("labels") or {})
+        existing_metadata = existing.metadata if existing else None
+        published_labels = dict((existing_metadata.labels if existing_metadata else None) or {})
         labels = {
-            **published,
+            **published_labels,
             "app.kubernetes.io/managed-by": MANAGED_BY,
             COMPONENT_LABEL: PLACEMENT_COMPONENT,
             SET_LABEL: static_set,
             PLACEMENT_LABEL: payload.get("placement", ""),
         }
-        metadata: dict[str, Any] = {"name": name, "namespace": namespace, "labels": labels}
-        annotations = (existing.get("metadata") or {}).get("annotations")
-        if annotations:
-            metadata["annotations"] = dict(annotations)
-        manifest: dict[str, Any] = {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": metadata,
-            "data": dict(payload),
-        }
-        if existing:
-            self.client.json("PUT", path, body=manifest)
-        else:
-            collection = CONFIG_MAP_PATH.format(namespace=namespace, name="").rstrip("/")
-            self.client.json("POST", collection, body=manifest)
+        annotations = dict((existing_metadata.annotations if existing_metadata else None) or {})
+        metadata = V1ObjectMeta(
+            name=name,
+            namespace=namespace,
+            labels=labels,
+            annotations=annotations or None,
+        )
+        upsert(
+            self.client,
+            namespace,
+            V1ConfigMap(
+                api_version="v1",
+                kind="ConfigMap",
+                metadata=metadata,
+                data=dict(payload),
+            ),
+        )
 
     def release_self(self, namespace: str, pod_name: str) -> None:
         """Remove this worker's finalizer and delete its own Pod.
@@ -214,15 +233,18 @@ class ClusterApi:
             namespace: The Pod's namespace.
             pod_name: The Pod's name.
         """
-        path = POD_PATH.format(namespace=namespace, name=pod_name)
         try:
-            self.client.json(
-                "PATCH",
-                path,
-                body={"metadata": {"finalizers": []}},
-                params={"fieldManager": MANAGED_BY},
+            self.client.core.patch_namespaced_pod(
+                pod_name,
+                namespace,
+                V1Pod(metadata=V1ObjectMeta(finalizers=[])),
+                field_manager=MANAGED_BY,
             )
-            self.client.json("DELETE", path, body={"gracePeriodSeconds": 0})
+            self.client.core.delete_namespaced_pod(
+                pod_name,
+                namespace,
+                grace_period_seconds=0,
+            )
         except (ApiUnavailableError, ApiRequestError) as error:
             print(json.dumps({"event": "release-self-failed", "error": str(error)}))
 
@@ -264,15 +286,68 @@ def assignment_from_environment(environ: Mapping[str, str]) -> Assignment:
     )
 
 
-def main(
-    argv: Sequence[str] | None = None,
+app = typer.Typer(
+    name="static-set-installer",
+    help="Install a StaticSet's static Pod on the node this Pod runs on.",
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+"""The Typer application behind the ``static-set-installer`` command."""
+
+
+@app.command()
+def install(
+    action: Annotated[
+        Action,
+        typer.Argument(
+            help="Reconcile the placement, or carry out a pending cleanup intent.",
+            show_default=True,
+        ),
+    ] = Action.RECONCILE,
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout",
+            help="Seconds to wait for the API server before treating it as unreachable.",
+        ),
+    ] = 15.0,
+    interval: Annotated[
+        float,
+        typer.Option(
+            "--interval",
+            help="Seconds between reconcile passes; 0 runs one pass and exits.",
+        ),
+    ] = DEFAULT_INTERVAL,
+    workload_running: Annotated[
+        bool,
+        typer.Option(
+            "--workload-running",
+            help="Treat the static workload as still running, so its configuration is kept.",
+        ),
+    ] = False,
+) -> None:
+    """Place the compiled static Pod on this node, or clean it up."""
+    raise typer.Exit(
+        code=run(
+            action,
+            timeout=timeout,
+            interval=interval,
+            workload_running=workload_running,
+        )
+    )
+
+
+def run(
+    action: Action,
     *,
     environ: Mapping[str, str] | None = None,
-    transport: Transport | None = None,
+    client: KubernetesClient | None = None,
     now: str | None = None,
     interval: float | None = None,
+    timeout: float = 15.0,
+    workload_running: bool = False,
 ) -> int:
-    """Run the installer command.
+    """Run the installer's action.
 
     A ``reconcile`` keeps reconciling: it repeats its pass every ``interval`` seconds
     until it is stopped. A placement has to notice configuration that changed, a
@@ -283,26 +358,26 @@ def main(
     its pass and stops, because a worker exists for exactly one placement's removal.
 
     Args:
-        argv: The command-line arguments, defaulting to ``sys.argv[1:]``.
+        action: Whether to reconcile the placement or carry out a cleanup.
         environ: The environment, defaulting to :data:`os.environ`.
-        transport: An alternative HTTP transport, used by tests.
+        client: An API client, used by tests instead of discovering a cluster.
         now: The current time, RFC 3339, defaulting to the real clock. A loop reuses
             it for every pass so that a test driving several passes sees one clock.
-        interval: Seconds between passes, defaulting to the parsed ``--interval``.
-            ``0`` runs a single pass, which is what the tests drive.
+        interval: Seconds between passes, defaulting to ``30``. ``0`` runs a single
+            pass, which is what the tests drive.
+        timeout: Seconds to wait for the API server before declaring it unreachable.
+        workload_running: Whether the static workload is still running, which decides
+            whether a cleanup may remove its configuration.
 
     Returns:
         The process exit status. Being offline is not a failure: the installer is a
         reconciler, and crash-looping would not bring the API back.
     """
     environment = os.environ if environ is None else environ
-    arguments = _parse(argv)
     timestamp = now or _now()
     try:
         assignment = assignment_from_environment(environment)
-        client = KubernetesClient.from_environment(
-            environment, transport=transport, timeout=arguments.timeout
-        )
+        cluster = client or KubernetesClient.from_environment(environment, timeout=timeout)
     except ApiUnavailableError as error:
         print(json.dumps({"event": "offline", "error": str(error)}))
         return 0
@@ -310,17 +385,17 @@ def main(
         print(json.dumps({"event": "invalid-environment", "error": str(error)}))
         return 2
 
-    api = ClusterApi(client)
-    if arguments.action == "cleanup":
+    api = ClusterApi(cluster)
+    if action is Action.CLEANUP:
         return _single_pass(
             api,
             assignment,
             timestamp=timestamp,
             cleanup=True,
-            workload_running=arguments.workload_running,
+            workload_running=workload_running,
         )
 
-    period = arguments.interval if interval is None else interval
+    period = DEFAULT_INTERVAL if interval is None else interval
     while True:
         status = _single_pass(api, assignment, timestamp=timestamp, cleanup=False)
         if status == 2 or period <= 0:
@@ -382,46 +457,6 @@ def _single_pass(
     if cleanup and report.acknowledged and assignment.placement:
         api.release_self(assignment.namespace, assignment.instance)
     return 0
-
-
-def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
-    """Parse the installer's arguments.
-
-    Args:
-        argv: The arguments, or ``None`` for ``sys.argv[1:]``.
-
-    Returns:
-        The parsed arguments.
-    """
-    parser = argparse.ArgumentParser(
-        prog="static-set-installer",
-        description="Install a StaticSet's static Pod on the node this Pod runs on.",
-    )
-    parser.add_argument(
-        "action",
-        nargs="?",
-        default="reconcile",
-        choices=["reconcile", "cleanup"],
-        help="reconcile the placement, or carry out a pending cleanup intent",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=15.0,
-        help="seconds to wait for the API server before treating it as unreachable",
-    )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=30.0,
-        help="seconds between reconcile passes; 0 runs one pass and exits",
-    )
-    parser.add_argument(
-        "--workload-running",
-        action="store_true",
-        help="treat the static workload as still running, so its configuration is kept",
-    )
-    return parser.parse_args(argv)
 
 
 def _publish(api: ClusterApi, assignment: Assignment, report: PlacementReport) -> None:
@@ -487,5 +522,15 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
 
 
+def main(argv: Sequence[str] | None = None) -> None:
+    """Run the command line application.
+
+    Args:
+        argv: The arguments, defaulting to ``sys.argv[1:]``.
+    """
+    app(args=list(argv) if argv is not None else None, prog_name="static-set-installer")
+
+
 if __name__ == "__main__":  # pragma: no cover - exercised through __main__
-    sys.exit(main())
+    main()
+    sys.exit(0)

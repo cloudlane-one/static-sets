@@ -9,7 +9,15 @@ dependencies = [
     # kopf is imported directly by the operator entry point, so it is declared here
     # rather than relied on as a transitive dependency of based-operators.
     "kopf>=1.44.6,<2.0.0",
+    # The official Kubernetes client (pydantic models since v37) is what the operator
+    # and the installer talk to the API server through.
+    "kubernetes>=37.0.1,<38.0.0",
     "pydantic>=2.11.0,<3.0.0",
+    # Both entry points are Typer applications, so the command definitions and the
+    # generated command reference come from the same declarations.
+    "typer>=0.27.3,<1.0.0",
+    # Imported to recognise the transport failures the generated client lets escape.
+    "urllib3>=2.8.0,<3.0.0",
 ]
 dynamic = ["version"]
 
@@ -54,6 +62,8 @@ docs = [
     "mkdocs-macros-plugin>=1.5.0,<2.0.0",
     "mkdocs-material>=9.7.6,<10.0.0",
     "mkdocs-section-index>=0.3.12,<0.4.0",
+    # Renders the command reference from the Typer applications themselves.
+    "mkdocs-typer2[mkdocs]>=0.4.1,<0.5.0",
     "mkdocstrings[python]>=1.0.4,<2.0.0",
     "properdocs>=1.6.7,<2.0.0",
 ]

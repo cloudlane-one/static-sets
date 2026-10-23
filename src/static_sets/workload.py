@@ -21,6 +21,14 @@ ignored.
 ``imagePullSecrets``, ``schedulerName``, ``priorityClassName`` and
 ``enableServiceLinks`` all require a live API server or a scheduler, so they
 cannot survive an offline host reboot and are rejected.
+
+The models here are therefore *not* the official client's ``V1Pod`` family, even
+though those are pydantic models too. They are the StaticSet API: they define the
+CRD, they forbid unknown fields, and they name the alternative when a field cannot
+be honoured. Using ``V1Pod`` would admit every field Kubernetes has, including the
+ones this operator must refuse, and would turn a rejection into a silent drop. The
+official models are used for the scheduler-placement API and where objects cross the
+API boundary — see :mod:`static_sets.models` and :mod:`static_sets.api`.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
+from kubernetes import client as k8s
 from pydantic import Field, model_validator
 
 from static_sets.base import WireModel
@@ -367,11 +376,30 @@ class Probe(WireModel):
     termination_grace_period_seconds: int | None = None
 
 
-class ResourceRequirements(WireModel):
-    """Container resource requests and limits, passed through unchanged."""
+class ResourceRequirements(k8s.V1ResourceRequirements):
+    """Container resource requests and limits, from the official Kubernetes type.
 
-    limits: dict[str, str] | None = None
-    requests: dict[str, str] | None = None
+    ``claims`` belongs to the scheduler, which never sees a static Pod: kubelet
+    starts it from a file and cannot resolve a claim. It is refused rather than
+    written into a manifest that would silently never take effect.
+    """
+
+    @model_validator(mode="after")
+    def _reject_claims(self) -> ResourceRequirements:
+        """Refuse resource claims.
+
+        Returns:
+            The validated requirements.
+
+        Raises:
+            ValueError: If a claim is declared.
+        """
+        if self.claims:
+            raise ValueError(
+                "resources.claims is not supported: a static Pod is not scheduled, so "
+                "a resource claim could never be resolved"
+            )
+        return self
 
 
 class ContainerSecurityContext(WireModel):
