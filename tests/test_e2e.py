@@ -743,7 +743,15 @@ def test_a_static_set_is_placed_installed_mirrored_and_cleaned_up(
     # kubelet registers the mirror under the manifest's name *plus the node's*, which is
     # why nothing may look a mirror up by the name it wrote into the manifest.
     assert mirror["metadata"]["name"] == f"{pod_name}-{node}"
-    assert mirror["status"]["phase"] == "Running", mirror
+    # The mirror appears as soon as kubelet reads the file, so its phase is still
+    # Pending then. Waiting for Running is what proves kubelet actually started it.
+    _wait_for(
+        "the static Pod to be running",
+        lambda: (
+            ((_mirror_for(namespace, name) or {}).get("status") or {}).get("phase") == "Running"
+        ),
+        timeout=300,
+    )
     _wait_for(
         "the placement to be acknowledged as installed",
         lambda: _installed(namespace, name),
