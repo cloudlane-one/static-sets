@@ -14,10 +14,12 @@ policy. Nothing is defaulted silently where a wrong default would be unsafe.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
+from kubernetes import client as k8s
 from pydantic import Field, model_validator
 
 import based_operators as bk
@@ -112,87 +114,67 @@ class NodeUnreachablePolicy(StrEnum):
     """
 
 
-class NodeSelectorRequirement(WireModel):
-    """One ``matchExpressions``/``matchFields`` predicate of a node selector term."""
+# The placement API is the official Kubernetes one. Aliasing the generated models
+# rather than re-declaring their fields keeps the CRD schema, the scheduler's own
+# types and the values the operator evaluates from drifting apart. The supported
+# subset is enforced by :meth:`Placement._check_supported_subset`, which is where a
+# refusal can name the field and the alternative.
+NodeSelectorRequirement = k8s.V1NodeSelectorRequirement
+"""One ``matchExpressions``/``matchFields`` predicate of a node selector term."""
 
-    key: str = Field(min_length=1)
-    operator: Literal["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"]
-    values: list[str] | None = None
+NodeSelectorTerm = k8s.V1NodeSelectorTerm
+"""A node selector term: the predicates a node must satisfy."""
 
+NodeSelector = k8s.V1NodeSelector
+"""A required node-affinity selector."""
 
-class NodeSelectorTerm(WireModel):
-    """A node selector term: the predicates a node must satisfy."""
+PreferredSchedulingTerm = k8s.V1PreferredSchedulingTerm
+"""A weighted preferred node-affinity term."""
 
-    match_expressions: list[NodeSelectorRequirement] | None = None
-    match_fields: list[NodeSelectorRequirement] | None = None
+NodeAffinity = k8s.V1NodeAffinity
+"""The node-affinity half of scheduler placement."""
 
+Affinity = k8s.V1Affinity
+"""Scheduler affinity for the *installer* Pods."""
 
-class NodeSelector(WireModel):
-    """A required node-affinity selector."""
+Toleration = k8s.V1Toleration
+"""A toleration an installer Pod must carry to be scheduled on a tainted node."""
 
-    node_selector_terms: list[NodeSelectorTerm] = Field(min_length=1)
+LabelSelectorRequirement = k8s.V1LabelSelectorRequirement
+"""One predicate of a label selector."""
 
-
-class PreferredSchedulingTerm(WireModel):
-    """A weighted preferred node-affinity term."""
-
-    weight: int = Field(ge=1, le=100)
-    preference: NodeSelectorTerm
-
-
-class NodeAffinity(WireModel):
-    """The node-affinity half of scheduler placement."""
-
-    required_during_scheduling_ignored_during_execution: NodeSelector | None = None
-    preferred_during_scheduling_ignored_during_execution: list[PreferredSchedulingTerm] | None = (
-        None
-    )
+LabelSelector = k8s.V1LabelSelector
+"""A label selector used by a topology spread constraint."""
 
 
-class Affinity(WireModel):
-    """Scheduler affinity for the *installer* Pods.
+class TopologySpreadConstraint(k8s.V1TopologySpreadConstraint):
+    """A topology spread constraint for installer placement.
 
-    Only node affinity is supported. Pod affinity and anti-affinity describe
-    co-location with other Pods, which a static Pod cannot honour because kubelet
-    does not run the scheduler for it.
+    The official type, with the API server's own defaults and ranges restored on the
+    three fields that are easy to get wrong. The remaining fields — including
+    ``matchLabelKeys``, ``nodeAffinityPolicy`` and ``nodeTaintsPolicy`` — are the
+    upstream ones and are passed to the scheduler unchanged.
     """
 
-    node_affinity: NodeAffinity | None = None
+    max_skew: int = Field(ge=1, alias="maxSkew")
+    topology_key: str = Field(min_length=1, alias="topologyKey")
+    when_unsatisfiable: str = Field(default="DoNotSchedule", alias="whenUnsatisfiable")
 
 
-class Toleration(WireModel):
-    """A toleration an installer Pod must carry to be scheduled on a tainted node."""
+_NODE_SELECTOR_OPERATORS = frozenset({"In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"})
+"""The node-selector operators :func:`static_sets.placement.eligible_nodes` evaluates."""
 
-    key: str | None = None
-    operator: Literal["Exists", "Equal"] | None = None
-    value: str | None = None
-    effect: Literal["NoSchedule", "PreferNoSchedule", "NoExecute"] | None = None
-    toleration_seconds: int | None = None
+_LABEL_SELECTOR_OPERATORS = frozenset({"In", "NotIn", "Exists", "DoesNotExist"})
+"""The label-selector operators a topology spread constraint may use."""
 
+_TOLERATION_OPERATORS = frozenset({"Exists", "Equal"})
+"""The toleration operators the API server accepts."""
 
-class LabelSelectorRequirement(WireModel):
-    """One predicate of a label selector."""
+_TOLERATION_EFFECTS = frozenset({"NoSchedule", "PreferNoSchedule", "NoExecute"})
+"""The taint effects a toleration may match."""
 
-    key: str = Field(min_length=1)
-    operator: Literal["In", "NotIn", "Exists", "DoesNotExist"]
-    values: list[str] | None = None
-
-
-class LabelSelector(WireModel):
-    """A label selector used by a topology spread constraint."""
-
-    match_labels: dict[str, str] | None = None
-    match_expressions: list[LabelSelectorRequirement] | None = None
-
-
-class TopologySpreadConstraint(WireModel):
-    """A supported topology spread constraint for installer placement."""
-
-    max_skew: int = Field(ge=1)
-    topology_key: str = Field(min_length=1)
-    when_unsatisfiable: Literal["DoNotSchedule", "ScheduleAnyway"] = "DoNotSchedule"
-    label_selector: LabelSelector | None = None
-    min_domains: int | None = None
+_SPREAD_WHEN_UNSATISFIABLE = frozenset({"DoNotSchedule", "ScheduleAnyway"})
+"""The topology spread policies the API server accepts."""
 
 
 class Placement(WireModel):
@@ -201,12 +183,154 @@ class Placement(WireModel):
     These settings steer the *scheduler*, which places installer Pods. They are
     not copied onto the emitted static workload, because kubelet never schedules a
     static Pod: it starts the file it finds on the node whose kubelet finds it.
+
+    The field types are the official Kubernetes ones, so the CRD documents the
+    scheduler API faithfully; the validator below refuses the parts this operator
+    does not act on, rather than accepting them and quietly ignoring them.
     """
 
     node_selector: dict[str, str] | None = None
     affinity: Affinity | None = None
     tolerations: list[Toleration] | None = None
     topology_spread_constraints: list[TopologySpreadConstraint] | None = None
+
+    @model_validator(mode="after")
+    def _check_supported_subset(self) -> Placement:
+        """Refuse placement settings the operator cannot honour.
+
+        The official types are a superset: they include pod affinity, free-form
+        selector operators and out-of-range weights. Accepting those would mean
+        either writing them into a workload the operator then mis-schedules, or
+        dropping them silently, so they are refused here with the field named.
+
+        Returns:
+            The validated placement.
+
+        Raises:
+            ValueError: If a setting outside the supported subset is used.
+        """
+        _check_affinity(self.affinity)
+        _check_tolerations(self.tolerations)
+        for constraint in self.topology_spread_constraints or []:
+            _check_constraint(constraint)
+        return self
+
+
+def _check_affinity(affinity: Affinity | None) -> None:
+    """Check the supported affinity subset.
+
+    Args:
+        affinity: The declared affinity, or ``None``.
+
+    Raises:
+        ValueError: If pod affinity is used, a selector term is empty, a weight is
+            out of range, or a selector operator is unknown.
+    """
+    if affinity is None:
+        return
+    if affinity.pod_affinity is not None or affinity.pod_anti_affinity is not None:
+        raise ValueError(
+            "spec.placement.affinity.podAffinity and podAntiAffinity are not supported: "
+            "only nodeAffinity steers installer placement"
+        )
+    node_affinity = affinity.node_affinity
+    if node_affinity is None:
+        return
+    required = node_affinity.required_during_scheduling_ignored_during_execution
+    if required is not None:
+        if not required.node_selector_terms:
+            raise ValueError(
+                "spec.placement.affinity.nodeAffinity."
+                "requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms must "
+                "name at least one term"
+            )
+        for term in required.node_selector_terms:
+            _check_selector_term(term)
+    for preferred in node_affinity.preferred_during_scheduling_ignored_during_execution or []:
+        if not 1 <= preferred.weight <= 100:
+            raise ValueError(
+                "spec.placement.affinity.nodeAffinity."
+                f"preferredDuringSchedulingIgnoredDuringExecution weight {preferred.weight} "
+                "is out of range; use 1-100"
+            )
+        _check_selector_term(preferred.preference)
+
+
+def _check_selector_term(term: NodeSelectorTerm) -> None:
+    """Check the operators of one node selector term.
+
+    Args:
+        term: The selector term.
+
+    Raises:
+        ValueError: If an operator outside the supported set is used.
+    """
+    requirements = [*(term.match_expressions or []), *(term.match_fields or [])]
+    for requirement in requirements:
+        if not requirement.key:
+            raise ValueError("spec.placement.affinity node selector key must not be empty")
+        if requirement.operator not in _NODE_SELECTOR_OPERATORS:
+            raise ValueError(
+                f"spec.placement.affinity node selector operator "
+                f"{requirement.operator!r} is not supported; use one of "
+                f"{', '.join(sorted(_NODE_SELECTOR_OPERATORS))}"
+            )
+
+
+def _check_tolerations(tolerations: Iterable[Toleration] | None) -> None:
+    """Check the operator and effect of every toleration.
+
+    Args:
+        tolerations: The declared tolerations, or ``None``.
+
+    Raises:
+        ValueError: If an operator or effect outside the API server's set is used.
+    """
+    for toleration in tolerations or []:
+        if toleration.operator is not None and toleration.operator not in _TOLERATION_OPERATORS:
+            raise ValueError(
+                f"spec.placement.tolerations operator {toleration.operator!r} is not "
+                f"supported; use one of {', '.join(sorted(_TOLERATION_OPERATORS))}"
+            )
+        if toleration.effect is not None and toleration.effect not in _TOLERATION_EFFECTS:
+            raise ValueError(
+                f"spec.placement.tolerations effect {toleration.effect!r} is not "
+                f"supported; use one of {', '.join(sorted(_TOLERATION_EFFECTS))}"
+            )
+
+
+def _check_constraint(constraint: TopologySpreadConstraint) -> None:
+    """Check one topology spread constraint.
+
+    Args:
+        constraint: The constraint.
+
+    Raises:
+        ValueError: If the skew, topology key, spread policy or label operator is
+            outside the API server's set.
+    """
+    if constraint.max_skew < 1:
+        raise ValueError("spec.placement.topologySpreadConstraints maxSkew must be at least 1")
+    if not constraint.topology_key:
+        raise ValueError("spec.placement.topologySpreadConstraints topologyKey must not be empty")
+    if constraint.when_unsatisfiable not in _SPREAD_WHEN_UNSATISFIABLE:
+        raise ValueError(
+            "spec.placement.topologySpreadConstraints whenUnsatisfiable "
+            f"{constraint.when_unsatisfiable!r} is not supported; use one of "
+            f"{', '.join(sorted(_SPREAD_WHEN_UNSATISFIABLE))}"
+        )
+    selector = constraint.label_selector
+    for expression in (selector.match_expressions if selector is not None else None) or []:
+        if not expression.key:
+            raise ValueError(
+                "spec.placement.topologySpreadConstraints.labelSelector key must not be empty"
+            )
+        if expression.operator not in _LABEL_SELECTOR_OPERATORS:
+            raise ValueError(
+                "spec.placement.topologySpreadConstraints.labelSelector operator "
+                f"{expression.operator!r} is not supported; use one of "
+                f"{', '.join(sorted(_LABEL_SELECTOR_OPERATORS))}"
+            )
 
 
 class UpdatePolicy(WireModel):

@@ -1,159 +1,175 @@
-"""The Kubernetes API client and strict admission validation."""
+"""The Kubernetes client wrapper and strict admission validation.
+
+The wrapper adds three things to the official client — failure classification, a
+timeout, and absence-as-``None`` — so those are what is tested. Transport,
+authentication, serialization and the API groups themselves are the official
+client's job; a throwaway HTTP server is enough to prove the wiring reaches it.
+"""
 
 from __future__ import annotations
 
+import http.server
 import json
-from typing import Any
+import threading
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from kubernetes.client import Configuration, V1ConfigMap, V1Node, V1ObjectMeta
 
-from static_sets.api import ApiRequestError, KubernetesClient
+from static_sets.api import ApiRequestError, KubernetesClient, or_none, upsert
 from static_sets.installer import ApiUnavailableError
 from static_sets.validation import strict_problems
 
 
-class Recorder:
-    """A transport that records calls and replays canned answers."""
+class _Answers:
+    """The canned responses a test server returns, keyed by path."""
 
-    def __init__(self, answers: dict[str, tuple[int, bytes]] | None = None) -> None:
-        """Build a recorder.
-
-        Args:
-            answers: Method-and-path keys to ``(status, body)`` answers.
-        """
-        self.answers = answers or {}
-        self.calls: list[tuple[str, str, bytes | None, dict[str, str]]] = []
-
-    def __call__(
-        self,
-        method: str,
-        url: str,
-        body: bytes | None,
-        headers: Any,
-    ) -> tuple[int, bytes]:
-        """Record one call and answer it.
-
-        Args:
-            method: The HTTP method.
-            url: The absolute URL.
-            body: The request body.
-            headers: The request headers.
-
-        Returns:
-            The canned answer, or an empty success.
-        """
-        self.calls.append((method, url, body, dict(headers)))
-        key = f"{method} {url.split('?')[0].replace('https://api.test', '')}"
-        return self.answers.get(key, (200, b"{}"))
+    def __init__(self) -> None:
+        self.answers: dict[str, tuple[int, object]] = {}
+        self.requests: list[tuple[str, str, dict[str, str]]] = []
+        self.url = ""
 
 
-def client(recorder: Any, **overrides: Any) -> KubernetesClient:
-    """Return a client wired to a recorder.
+def _handler(answers: _Answers) -> type[http.server.BaseHTTPRequestHandler]:
+    """Return a handler class that answers from a shared table.
 
     Args:
-        recorder: The transport.
-        **overrides: Client overrides.
+        answers: The answers and the request log to use.
+
+    Returns:
+        The handler class.
+    """
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            headers = {key.lower(): value for key, value in self.headers.items()}
+            answers.requests.append(("GET", self.path, headers))
+            status, body = answers.answers.get(self.path, (404, {"reason": "NotFound"}))
+            payload = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - inherited signature
+            del format, args
+
+    return Handler
+
+
+@pytest.fixture()
+def answers() -> Iterator[_Answers]:
+    """Serve a table of canned answers on a loopback port.
+
+    Yields:
+        The answers object, so a test can fill in responses and inspect requests.
+    """
+    canned = _Answers()
+    server = http.server.HTTPServer(("127.0.0.1", 0), _handler(canned))
+    canned.url = f"http://127.0.0.1:{server.server_port}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield canned
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture()
+def client(answers: _Answers) -> KubernetesClient:
+    """Return a client pointed at the test server.
+
+    Args:
+        answers: The fixture that owns the server URL.
 
     Returns:
         The client.
     """
-    return KubernetesClient(
-        server="https://api.test", token="t0ken", transport=recorder, **overrides
+    return KubernetesClient(Configuration(host=answers.url), timeout=5)
+
+
+def test_a_list_returns_the_clients_typed_models(
+    answers: _Answers, client: KubernetesClient
+) -> None:
+    """A listing is a list of the official models, not of dictionaries."""
+    answers.answers["/api/v1/nodes"] = (
+        200,
+        {
+            "apiVersion": "v1",
+            "kind": "NodeList",
+            "metadata": {},
+            "items": [{"metadata": {"name": "node-a"}}],
+        },
     )
 
+    nodes = client.core.list_node().items or []
 
-def test_calls_carry_the_bearer_token_and_accept_header() -> None:
-    """Every request is authenticated and asks for JSON."""
-    recorder = Recorder()
-
-    client(recorder).json("GET", "/api/v1/nodes")
-
-    method, url, body, headers = recorder.calls[0]
-    assert (method, url) == ("GET", "https://api.test/api/v1/nodes")
-    assert body is None
-    assert headers["Authorization"] == "Bearer t0ken"
-    assert headers["Accept"] == "application/json"
+    assert len(nodes) == 1
+    assert isinstance(nodes[0], V1Node)
+    assert nodes[0].metadata is not None
+    assert nodes[0].metadata.name == "node-a"
 
 
-def test_query_parameters_are_encoded() -> None:
-    """Query parameters reach the server, encoded."""
-    recorder = Recorder()
-
-    client(recorder).json("GET", "/api/v1/pods", params={"labelSelector": "a=b,c=d"})
-
-    assert recorder.calls[0][1] == "https://api.test/api/v1/pods?labelSelector=a%3Db%2Cc%3Dd"
+def test_an_absent_config_map_is_none(answers: _Answers, client: KubernetesClient) -> None:
+    """A 404 on a read that expects absence is an answer, not a failure."""
+    assert or_none(client.core.read_namespaced_config_map, "absent", "edge") is None
 
 
-def test_bodies_are_json_encoded_with_a_content_type() -> None:
-    """A request body is JSON, with the matching content type."""
-    recorder = Recorder()
-
-    client(recorder).json("PUT", "/api/v1/x", body={"a": 1})
-
-    method, _, body, headers = recorder.calls[0]
-    assert method == "PUT"
-    assert json.loads(body or b"") == {"a": 1}
-    assert headers["Content-Type"] == "application/json"
-
-
-def test_a_404_is_returned_as_the_missing_sentinel() -> None:
-    """A 404 is an answer, not a failure, when the caller expects absence."""
-    recorder = Recorder({"GET /api/v1/configmaps": (404, b'{"reason":"NotFound"}')})
-
-    result = client(recorder).json("GET", "/api/v1/configmaps", missing={})
-
-    assert result == {}
-
-
-def test_a_404_without_a_sentinel_is_an_error() -> None:
-    """Without a sentinel a 404 is reported as a refusal."""
-    recorder = Recorder({"GET /api/v1/configmaps": (404, b'{"reason":"NotFound"}')})
+def test_or_none_still_raises_a_refusal(answers: _Answers, client: KubernetesClient) -> None:
+    """Only absence is turned into a value; any other refusal is still an error."""
+    answers.answers["/api/v1/nodes"] = (403, {"reason": "Forbidden"})
 
     with pytest.raises(ApiRequestError):
-        client(recorder).json("GET", "/api/v1/configmaps")
+        or_none(client.core.list_node)
 
 
-def test_a_refusal_reports_the_status_and_body() -> None:
+def test_a_refusal_is_reported_with_its_status(answers: _Answers, client: KubernetesClient) -> None:
     """A 403 is surfaced with enough detail to diagnose it."""
-    recorder = Recorder({"POST /api/v1/x": (403, b'{"reason":"Forbidden"}')})
+    answers.answers["/api/v1/nodes"] = (403, {"reason": "Forbidden"})
 
     with pytest.raises(ApiRequestError) as error:
-        client(recorder).json("POST", "/api/v1/x", body={})
+        client.core.list_node()
 
+    assert error.value.status == 403
     assert "403" in str(error.value)
     assert "Forbidden" in str(error.value)
 
 
-def test_a_connection_failure_is_reported_as_unreachable() -> None:
-    """An OS-level failure means the API is unreachable, not that it refused."""
+def test_an_unreachable_server_is_reported_as_unavailable() -> None:
+    """A refused connection means the API is unreachable, not that it refused."""
+    closed = Configuration(host="http://127.0.0.1:1")
 
-    def broken(*_: Any) -> tuple[int, bytes]:
-        raise OSError("connection refused")
-
-    with pytest.raises(ApiUnavailableError) as error:
-        client(broken).json("GET", "/api/v1/nodes")
-
-    assert "connection refused" in str(error.value)
+    with pytest.raises(ApiUnavailableError):
+        KubernetesClient(closed, timeout=1).core.list_node()
 
 
-def test_an_empty_body_decodes_to_none() -> None:
-    """An empty 200 body is not a JSON error."""
-    recorder = Recorder({"DELETE /api/v1/x": (200, b"")})
+def test_the_bearer_token_is_sent(answers: _Answers) -> None:
+    """The client authenticates with the projected service-account token."""
+    answers.answers["/api/v1/nodes"] = (
+        200,
+        {"apiVersion": "v1", "kind": "NodeList", "metadata": {}, "items": []},
+    )
+    configuration = Configuration(host=answers.url)
+    configuration.api_key["BearerToken"] = "bearer t0ken"
 
-    assert client(recorder).json("DELETE", "/api/v1/x") is None
+    KubernetesClient(configuration, timeout=5).core.list_node()
+
+    assert answers.requests[0][2]["authorization"] == "bearer t0ken"
 
 
 def test_from_environment_discovers_the_in_cluster_endpoint() -> None:
     """The service host and port produce the API server URL."""
-    recorder = Recorder()
-
     built = KubernetesClient.from_environment(
-        {"KUBERNETES_SERVICE_HOST": "10.0.0.1", "KUBERNETES_SERVICE_PORT": "6443"},
-        transport=recorder,
+        {"KUBERNETES_SERVICE_HOST": "10.0.0.1", "KUBERNETES_SERVICE_PORT": "6443"}
     )
 
-    assert built.server == "https://10.0.0.1:6443"
-    assert built.token is None
+    assert built.configuration.host == "https://10.0.0.1:6443"
+    assert built.configuration.api_key.get("BearerToken") is None
 
 
 def test_from_environment_refuses_without_a_server() -> None:
@@ -162,11 +178,12 @@ def test_from_environment_refuses_without_a_server() -> None:
         KubernetesClient.from_environment({})
 
 
-def test_from_environment_reads_the_token_file(tmp_path: Any) -> None:
-    """The projected service-account token is picked up from disk."""
+def test_from_environment_reads_the_token_and_ca_files(tmp_path: Path) -> None:
+    """The projected service-account token and CA are picked up from disk."""
     directory = tmp_path / "sa"
     directory.mkdir()
-    (directory / "token").write_text("secret-token\n", encoding="utf-8")
+    # A projected token file carries the token and nothing else, not even a newline.
+    (directory / "token").write_text("secret-token", encoding="utf-8")
     (directory / "ca.crt").write_text("ca", encoding="utf-8")
 
     built = KubernetesClient.from_environment(
@@ -176,8 +193,127 @@ def test_from_environment_reads_the_token_file(tmp_path: Any) -> None:
         }
     )
 
-    assert built.token == "secret-token"
-    assert built.ca_path == str(directory / "ca.crt")
+    assert built.configuration.api_key["BearerToken"] == "bearer secret-token"
+    assert built.configuration.ssl_ca_cert == str(directory / "ca.crt")
+
+
+class FakeCore:
+    """A ConfigMap API group that records writes and can pretend to be empty."""
+
+    def __init__(self, existing: V1ConfigMap | None = None) -> None:
+        """Build the fake.
+
+        Args:
+            existing: The object reads return, or ``None`` to answer 404.
+        """
+        self.existing = existing
+        self.created: list[V1ConfigMap] = []
+        self.replaced: list[V1ConfigMap] = []
+
+    def read_namespaced_config_map(self, name: str, namespace: str, **_: Any) -> V1ConfigMap:
+        """Return the configured object, or answer 404.
+
+        Args:
+            name: The ConfigMap's name.
+            namespace: The ConfigMap's namespace.
+            **_: Further client arguments.
+
+        Returns:
+            The existing object.
+
+        Raises:
+            ApiRequestError: If the fake was built empty.
+        """
+        del name, namespace
+        if self.existing is None:
+            raise ApiRequestError("ConfigMap does not exist", status=404)
+        return self.existing
+
+    def create_namespaced_config_map(
+        self, namespace: str, body: V1ConfigMap, **_: Any
+    ) -> V1ConfigMap:
+        """Record a creation.
+
+        Args:
+            namespace: The namespace.
+            body: The object to create.
+            **_: Further client arguments.
+
+        Returns:
+            The created object.
+        """
+        del namespace
+        self.created.append(body)
+        return body
+
+    def replace_namespaced_config_map(
+        self, name: str, namespace: str, body: V1ConfigMap, **_: Any
+    ) -> V1ConfigMap:
+        """Record a replacement.
+
+        Args:
+            name: The ConfigMap's name, which the generated signature puts first.
+            namespace: The namespace.
+            body: The object to replace with.
+            **_: Further client arguments.
+
+        Returns:
+            The replaced object.
+        """
+        del namespace
+        assert body.metadata is not None and body.metadata.name == name
+        self.replaced.append(body)
+        return body
+
+
+def fake_core_client(core: FakeCore) -> KubernetesClient:
+    """Return a client whose ConfigMap API group is a fake.
+
+    Args:
+        core: The fake to install.
+
+    Returns:
+        The client.
+    """
+    client = KubernetesClient(Configuration(host="https://api.test"))
+    client.core = cast(Any, core)
+    return client
+
+
+def test_upsert_creates_an_object_that_is_absent() -> None:
+    """A first upsert is a creation."""
+    core = FakeCore()
+    client = fake_core_client(core)
+
+    upsert(
+        client,
+        "edge",
+        V1ConfigMap(metadata=V1ObjectMeta(name="web-placement-id1", namespace="edge")),
+    )
+
+    assert [(item.metadata.name if item.metadata else None) for item in core.created] == [
+        "web-placement-id1"
+    ]
+    assert core.replaced == []
+
+
+def test_upsert_replaces_an_existing_object_with_its_resource_version() -> None:
+    """A later upsert is a replacement that carries the version it read."""
+    existing = V1ConfigMap(
+        metadata=V1ObjectMeta(name="web-placement-id1", namespace="edge", resource_version="42")
+    )
+    core = FakeCore(existing)
+    client = fake_core_client(core)
+
+    upsert(
+        client,
+        "edge",
+        V1ConfigMap(metadata=V1ObjectMeta(name="web-placement-id1", namespace="edge")),
+    )
+
+    assert core.created == []
+    assert core.replaced[0].metadata is not None
+    assert core.replaced[0].metadata.resource_version == "42"
 
 
 def test_strict_problems_accepts_a_valid_body(make_resource: Any) -> None:

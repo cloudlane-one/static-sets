@@ -33,7 +33,9 @@ on top. Where a directory holds project-specific content, it is described below.
   - `static_sets/placement.py`: installer placement and the installer workload.
   - `static_sets/controller.py`: the pure reconcile planner and the status builder.
   - `static_sets/paths.py`: path validation and durable write primitives.
-  - `static_sets/api.py`: the minimal Kubernetes API client.
+  - `static_sets/api.py`: the official Kubernetes client, configured for the
+    operator, with failures classified as "refused" or "unreachable" and absence
+    handled at the call sites that probe.
   - `static_sets/validation.py`: strict admission validation.
   - `static_sets/naming.py`: deterministic names, labels and identities.
 - `tests`: Code for automated testing of library modules and applications (via

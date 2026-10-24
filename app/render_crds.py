@@ -17,7 +17,7 @@
 # # Render the CustomResourceDefinition
 #
 # The CRD is generated from the Pydantic models, so it can never drift from the
-# type the operator actually reconciles. This script writes the rendered document
+# type the operator actually reconciles. This command writes the rendered document
 # into the Helm chart's `crds/` directory, which is where Helm installs CRDs from:
 #
 # ```shell
@@ -27,13 +27,16 @@
 # The test suite re-renders the same document and compares it with the committed
 # file, so a model change that was not re-rendered fails the build instead of
 # silently disagreeing with the chart.
+#
+# The command is a Typer application like the installer, so its reference page is
+# generated from the declaration below rather than written by hand.
 
 # %%
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
+import typer
 from based_operators import crd_yaml
 
 from static_sets.models import StaticSet
@@ -58,17 +61,22 @@ def render() -> Path:
     return target
 
 
-def main() -> int:
-    """Render the CRD and report what was written.
+app = typer.Typer(
+    name="render-crds",
+    help="Render the StaticSet CustomResourceDefinition into the Helm chart.",
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+"""The Typer application behind the CRD renderer."""
 
-    Returns:
-        The process exit status.
-    """
+
+@app.command()
+def render_crd() -> None:
+    """Write the CRD generated from the models into the chart's crds/ directory."""
     target = render()
-    print(f"wrote {target.relative_to(REPO_ROOT).as_posix()}")
-    return 0
+    typer.echo(f"wrote {target.relative_to(REPO_ROOT).as_posix()}")
 
 
 # %%
 if __name__ == "__main__":
-    sys.exit(main())
+    app(prog_name="render-crds")

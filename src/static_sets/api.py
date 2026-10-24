@@ -1,31 +1,66 @@
-"""A small Kubernetes API client for the installer and the controller adapter.
+"""The Kubernetes client, with this project's failure semantics.
 
-Only the handful of calls this operator makes are modelled, and the transport is
-injectable, so the request shaping is testable without a cluster. Connection
-failures are surfaced as :class:`~static_sets.installer.ApiUnavailableError`,
-which every caller treats as "retain everything": an unreachable API is never a
-reason to change local state.
+Everything else comes from the official ``kubernetes`` client: transport,
+authentication, serialization, and the pydantic models for the built-in
+resources. The generated API groups are exposed as they are, so a call site reads
+like the generated documentation and keeps the generated signatures:
+
+>>> client.core.read_namespaced_config_map("web-conf", "edge")  # -> V1ConfigMap
+>>> client.apps.list_namespaced_deployment("edge")              # -> V1DeploymentList
+
+Only three things are added, because the operator's correctness depends on them
+and they have nowhere else to live:
+
+* **failures are classified.** An unreachable API is not an empty desired state:
+  the installer keeps the last committed revision and the controller retries,
+  while a refusal (403, 409, …) is a real answer to act on. The generated client
+  reports the first as a status-less :class:`ApiException` in some paths and lets
+  urllib3 raise in others, so the classification is done once, in the client.
+* **absence can be an answer.** Optional reads use :func:`or_none`, so "not there
+  yet" is a value at the few call sites that probe, not an exception everywhere.
+* **the client is built from an environment mapping**, without mutating the
+  process-global configuration, so tests and the entry points configure it the
+  same way.
+
+The operator's own models are untouched: ``spec.template`` is the StaticSet API,
+and a static Pod's template has deliberately narrower (and stricter) semantics
+than ``V1Pod``. See :mod:`static_sets.workload`.
 """
 
 from __future__ import annotations
 
-import json
 import os
-import ssl
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
+
+from urllib3.exceptions import HTTPError as Urllib3Error
+
+from kubernetes.client import (
+    ApiClient,
+    ApiException,
+    ApiResponse,
+    AppsV1Api,
+    Configuration,
+    CoreV1Api,
+    CustomObjectsApi,
+    V1ConfigMap,
+    V1DaemonSet,
+    V1Deployment,
+    V1Pod,
+)
+from kubernetes.client.rest import RESTResponse
+from kubernetes.config.config_exception import ConfigException
+from kubernetes.config.incluster_config import InClusterConfigLoader
 
 from static_sets.installer import ApiUnavailableError
 
 __all__ = [
     "ApiRequestError",
-    "JsonClient",
     "KubernetesClient",
-    "Transport",
+    "KubernetesObject",
+    "or_none",
+    "upsert",
 ]
 
 SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -34,85 +69,163 @@ SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 DEFAULT_TIMEOUT = 15.0
 """Seconds to wait for the API server before declaring it unreachable."""
 
-Transport = Callable[[str, str, "bytes | None", Mapping[str, str]], tuple[int, bytes]]
-"""Performs one HTTP call and returns ``(status, body)``.
-
-A transport is given the method, the absolute URL, an optional JSON body and the
-request headers. Raising an :class:`OSError` from a transport is reported as the
-API being unreachable.
-"""
+type KubernetesObject = V1ConfigMap | V1Deployment | V1DaemonSet | V1Pod
+"""The built-in objects this operator creates or replaces."""
 
 
 class ApiRequestError(RuntimeError):
     """The API server answered, but refused the request.
 
-    This is distinct from the API being unreachable: a 404 or a 403 is a real
+    This is distinct from the API being unreachable: a 403 or a 422 is a real
     answer, and callers act on it rather than falling back to retained state.
     """
 
+    def __init__(self, message: str, *, status: int) -> None:
+        """Build the error.
 
-class JsonClient(Protocol):
-    """The JSON call surface the operator adapter and the installer rely on."""
+        Args:
+            message: What failed and how.
+            status: The HTTP status the server answered with.
+        """
+        super().__init__(message)
+        self.status = status
 
-    def json(
+
+def _translated(error: ApiException, action: str) -> ApiRequestError | ApiUnavailableError:
+    """Classify one generated-client failure.
+
+    Args:
+        error: The failure the generated client raised.
+        action: What was being attempted, for the message.
+
+    Returns:
+        The project's equivalent error.
+    """
+    if not error.status:
+        # A status-less ApiException is a failed connection, not a refusal.
+        return ApiUnavailableError(f"{action} failed: {error.reason}")
+    return ApiRequestError(
+        f"{action} returned {error.status}: {error.reason}",
+        status=error.status,
+    )
+
+
+class _GuardedApiClient(ApiClient):
+    """The generated client, with the project's timeout and failure semantics.
+
+    Every generated endpoint funnels through :meth:`call_api`, so translating
+    there covers all of them without wrapping a single method: the API groups
+    keep their generated signatures and return types.
+    """
+
+    def __init__(self, configuration: Configuration, *, timeout: float) -> None:
+        """Build the client.
+
+        Args:
+            configuration: The connection, credentials and CA to use.
+            timeout: Seconds to wait before declaring the API unreachable.
+        """
+        super().__init__(configuration=configuration)
+        self.request_timeout = timeout
+
+    def call_api(
         self,
         method: str,
-        path: str,
-        *,
+        url: str,
+        header_params: Any = None,
         body: Any = None,
-        params: Mapping[str, str] | None = None,
-        missing: Any = None,
-    ) -> Any:
-        """Perform one API call and decode the response.
+        post_params: Any = None,
+        _request_timeout: Any = None,
+    ) -> RESTResponse:
+        """Perform one request, translating its failure.
 
         Args:
             method: The HTTP method.
-            path: The API path.
-            body: A JSON-serializable request body.
-            params: Query parameters.
-            missing: The value to return for a 404 instead of raising.
+            url: The absolute URL.
+            header_params: The request headers.
+            body: The request body.
+            post_params: Form parameters.
+            _request_timeout: A per-call timeout, defaulting to the client's.
 
         Returns:
-            The decoded response, or ``missing``.
+            The raw response.
+
+        Raises:
+            ApiUnavailableError: If the API could not be reached at all.
+            ApiRequestError: If the API answered and refused the request.
         """
-        ...
+        try:
+            return super().call_api(
+                method,
+                url,
+                header_params=header_params,
+                body=body,
+                post_params=post_params,
+                _request_timeout=(
+                    self.request_timeout if _request_timeout is None else _request_timeout
+                ),
+            )
+        except ApiException as error:
+            raise _translated(error, f"{method} {url}") from error
+        except (OSError, Urllib3Error) as error:
+            # The generated client lets some transport failures escape as urllib3's
+            # own exception (a retry exhaustion, for instance).
+            raise ApiUnavailableError(f"{method} {url} failed: {error}") from error
+
+    def response_deserialize(
+        self,
+        response_data: RESTResponse,
+        response_types_map: dict[str, Any] | None = None,
+    ) -> ApiResponse[Any]:
+        """Deserialize a response, translating a non-2xx status.
+
+        The generated client raises a typed :class:`ApiException` subclass from here
+        rather than from :meth:`call_api`, so both funnels have to be covered.
+
+        Args:
+            response_data: The raw response.
+            response_types_map: The status-to-type map of the endpoint.
+
+        Returns:
+            The deserialized response.
+
+        Raises:
+            ApiUnavailableError: If the API could not be reached at all.
+            ApiRequestError: If the API answered and refused the request.
+        """
+        try:
+            return super().response_deserialize(response_data, response_types_map)
+        except ApiException as error:
+            raise _translated(error, "the API") from error
 
 
 class KubernetesClient:
-    """A minimal, synchronous client for the Kubernetes API."""
+    """The generated API groups, connected and configured for this operator."""
 
     def __init__(
         self,
+        configuration: Configuration,
         *,
-        server: str,
-        token: str | None = None,
-        ca_path: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
-        transport: Transport | None = None,
     ) -> None:
-        """Build a client.
+        """Build a client from an official client configuration.
 
         Args:
-            server: The API server's base URL, e.g. ``https://10.0.0.1:443``.
-            token: A bearer token, when the client authenticates.
-            ca_path: Path of the cluster CA bundle. Certificate verification is
-                always on: the API server is the one component whose identity must
-                not be in doubt.
+            configuration: The connection, credentials and CA to use.
             timeout: Seconds to wait before declaring the API unreachable.
-            transport: An alternative transport, used by tests.
         """
-        self.server = server.rstrip("/")
-        self.token = token
-        self.ca_path = ca_path
-        self.timeout = timeout
-        self._transport = transport
+        self.configuration = configuration
+        api_client = _GuardedApiClient(configuration, timeout=timeout)
+        self.core = CoreV1Api(api_client)
+        self.apps = AppsV1Api(api_client)
+        self.custom = CustomObjectsApi(api_client)
 
     @classmethod
     def in_cluster(cls, **overrides: Any) -> KubernetesClient:
         """Build a client from the Pod's service-account configuration.
 
         Args:
-            **overrides: Values that replace the discovered ones, e.g. a transport.
+            **overrides: Values that replace the discovered ones.
 
         Returns:
             The client.
@@ -123,13 +236,17 @@ class KubernetesClient:
     def from_environment(
         cls,
         environ: Mapping[str, str],
-        **overrides: Any,
+        *,
+        configuration: Configuration | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> KubernetesClient:
         """Build a client from an environment mapping.
 
         Args:
             environ: The environment to read.
-            **overrides: Values that replace the discovered ones.
+            configuration: A ready-made configuration, which replaces discovery
+                entirely. Used by tests and by callers with a kubeconfig.
+            timeout: Seconds to wait before declaring the API unreachable.
 
         Returns:
             The client.
@@ -137,140 +254,137 @@ class KubernetesClient:
         Raises:
             ApiUnavailableError: If the API server address cannot be determined.
         """
-        host = environ.get("KUBERNETES_SERVICE_HOST")
-        port = environ.get("KUBERNETES_SERVICE_PORT", "443")
-        server = overrides.pop("server", None)
-        if server is None:
-            if not host:
-                raise ApiUnavailableError(
-                    "KUBERNETES_SERVICE_HOST is not set and no API server was configured"
-                )
-            server = f"https://{host}:{port}"
-        directory = Path(environ.get("STATIC_SETS_SERVICE_ACCOUNT_DIR", SERVICE_ACCOUNT_DIR))
-        token = overrides.pop("token", None)
-        if token is None:
-            token = _read_optional(directory / "token")
-        ca_path = overrides.pop("ca_path", None)
-        if ca_path is None and (directory / "ca.crt").is_file():
-            ca_path = str(directory / "ca.crt")
-        return cls(server=server, token=token, ca_path=ca_path, **overrides)
-
-    def call(
-        self,
-        method: str,
-        path: str,
-        *,
-        body: Any = None,
-        params: Mapping[str, str] | None = None,
-    ) -> tuple[int, bytes]:
-        """Perform one API call.
-
-        Args:
-            method: The HTTP method.
-            path: The API path, starting with a slash.
-            body: A JSON-serializable request body.
-            params: Query parameters.
-
-        Returns:
-            The status code and the response body.
-
-        Raises:
-            ApiUnavailableError: If the API could not be reached at all.
-        """
-        url = f"{self.server}{path}"
-        if params:
-            url = f"{url}?{urllib.parse.urlencode(params)}"
-        headers = {"Accept": "application/json"}
-        payload: bytes | None = None
-        if body is not None:
-            payload = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        transport = self._transport or self._urllib_transport
-        try:
-            return transport(method, url, payload, headers)
-        except OSError as error:
-            raise ApiUnavailableError(f"{method} {path} failed: {error}") from error
-
-    def json(
-        self,
-        method: str,
-        path: str,
-        *,
-        body: Any = None,
-        params: Mapping[str, str] | None = None,
-        missing: Any = None,
-    ) -> Any:
-        """Perform one API call and decode the JSON response.
-
-        Args:
-            method: The HTTP method.
-            path: The API path.
-            body: A JSON-serializable request body.
-            params: Query parameters.
-            missing: The value to return for a 404 instead of raising.
-
-        Returns:
-            The decoded response, or ``missing`` for a 404.
-
-        Raises:
-            ApiRequestError: If the API refused the request.
-            ApiUnavailableError: If the API could not be reached.
-        """
-        status, raw = self.call(method, path, body=body, params=params)
-        if status == 404 and missing is not None:
-            return missing
-        if not 200 <= status < 300:
-            raise ApiRequestError(
-                f"{method} {path} returned {status}: {raw.decode('utf-8', 'replace')}"
-            )
-        if not raw:
-            return None
-        return json.loads(raw)
-
-    def _urllib_transport(
-        self,
-        method: str,
-        url: str,
-        body: bytes | None,
-        headers: Mapping[str, str],
-    ) -> tuple[int, bytes]:
-        """Perform an HTTP call with the standard library.
-
-        Args:
-            method: The HTTP method.
-            url: The absolute URL.
-            body: The request body.
-            headers: The request headers.
-
-        Returns:
-            The status code and the response body.
-
-        Raises:
-            OSError: If the connection failed.
-        """
-        request = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
-        context = None
-        if url.startswith("https"):
-            context = ssl.create_default_context(cafile=self.ca_path)
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
-                return response.status, response.read()
-        except urllib.error.HTTPError as error:
-            return error.code, error.read()
+        if configuration is None:
+            configuration = _configuration_from_environment(environ)
+        return cls(configuration, timeout=timeout)
 
 
-def _read_optional(path: Path) -> str | None:
-    """Read a file, returning ``None`` when it does not exist.
+def or_none[**P, R](operation: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R | None:
+    """Call an API operation, returning ``None`` when the object does not exist.
+
+    The generated client raises for a 404 like for any other refusal. A caller that
+    is probing — an optional ConfigMap, a placement record written on a previous
+    pass — treats absence as a normal answer instead.
 
     Args:
-        path: The file to read.
+        operation: The generated API method to call.
+        *args: Its positional arguments.
+        **kwargs: Its keyword arguments.
 
     Returns:
-        The stripped content, or ``None``.
+        Its result, or ``None`` when the server answered 404.
+
+    Raises:
+        ApiUnavailableError: If the API could not be reached at all.
+        ApiRequestError: If the API refused the request for another reason.
     """
     try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
+        return operation(*args, **kwargs)
+    except ApiRequestError as error:
+        if error.status == 404:
+            return None
+        raise
+
+
+def upsert(client: KubernetesClient, namespace: str, obj: KubernetesObject) -> None:
+    """Create an object, or replace it in place when it already exists.
+
+    The existing object's ``resourceVersion`` is carried onto the replacement,
+    which is what makes the write an update rather than a conflict.
+
+    Args:
+        client: The client whose API groups are used.
+        namespace: The object's namespace.
+        obj: The desired object.
+
+    Raises:
+        ValueError: If the object has no name.
+        ApiUnavailableError: If the API could not be reached.
+        ApiRequestError: If the API refused the read or the write.
+    """
+    metadata = obj.metadata
+    if metadata is None or not metadata.name:
+        raise ValueError(f"a {type(obj).__name__} needs a metadata.name to be applied")
+    read, create, replace = _operations(client, type(obj))
+    existing = or_none(read, metadata.name, namespace)
+    if existing is None:
+        create(namespace, obj)
+        return
+    if existing.metadata is not None:
+        metadata.resource_version = existing.metadata.resource_version
+    replace(metadata.name, namespace, obj)
+
+
+def _operations(
+    client: KubernetesClient,
+    kind: type[KubernetesObject],
+) -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
+    """Return the read, create and replace operations for an object type.
+
+    Args:
+        client: The client whose API groups are used.
+        kind: The object type.
+
+    Returns:
+        The read, create and replace callables.
+
+    Raises:
+        TypeError: If the type is not one this operator applies.
+    """
+    group, noun = _GROUPS.get(kind, (None, None))
+    if group is None or noun is None:
+        raise TypeError(f"{kind.__name__} is not an object this operator applies")
+    api: Any = getattr(client, group)
+    return (
+        getattr(api, f"read_namespaced_{noun}"),
+        getattr(api, f"create_namespaced_{noun}"),
+        getattr(api, f"replace_namespaced_{noun}"),
+    )
+
+
+_GROUPS: dict[type[Any], tuple[str, str]] = {
+    V1ConfigMap: ("core", "config_map"),
+    V1Pod: ("core", "pod"),
+    V1Deployment: ("apps", "deployment"),
+    V1DaemonSet: ("apps", "daemon_set"),
+}
+"""Where each applied kind lives: its API group and its generated method stem."""
+
+
+def _configuration_from_environment(environ: Mapping[str, str]) -> Configuration:
+    """Build the official client's configuration from an environment.
+
+    The service-account directory is read by the official in-cluster loader, so the
+    bearer token is refreshed when the projected token rotates. A directory without a
+    token or CA is not an error: a client may be built outside a cluster, and the
+    first call then fails as unreachable rather than here.
+
+    Args:
+        environ: The environment to read.
+
+    Returns:
+        The configuration.
+
+    Raises:
+        ApiUnavailableError: If the API server address cannot be determined.
+    """
+    host = environ.get("KUBERNETES_SERVICE_HOST")
+    if not host:
+        raise ApiUnavailableError(
+            "KUBERNETES_SERVICE_HOST is not set and no API server was configured"
+        )
+    port = environ.get("KUBERNETES_SERVICE_PORT", "443")
+    directory = Path(environ.get("STATIC_SETS_SERVICE_ACCOUNT_DIR", SERVICE_ACCOUNT_DIR))
+    configuration = Configuration()
+    loader = InClusterConfigLoader(
+        token_filename=str(directory / "token"),
+        cert_filename=str(directory / "ca.crt"),
+        environ={**environ, "KUBERNETES_SERVICE_PORT": port},
+    )
+    try:
+        loader.load_and_set(client_configuration=configuration)
+    except (ConfigException, OSError):
+        # No usable token or CA: build an unauthenticated client rather than failing
+        # to construct one. The first call then reports the real answer.
+        configuration.host = f"https://{host}:{port}"
+    return configuration

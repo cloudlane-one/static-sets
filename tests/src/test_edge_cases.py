@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import http.server
 import os
-import threading
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from static_sets.api import ApiRequestError, KubernetesClient
+from static_sets.api import KubernetesClient
 from static_sets.errors import (
     PathSecurityError,
     SecretDisclosureError,
@@ -131,74 +128,6 @@ def test_ownership_check_is_a_no_op_for_a_missing_path(tmp_path: Path) -> None:
 # -- api -------------------------------------------------------------------------
 
 
-class _Handler(http.server.BaseHTTPRequestHandler):
-    """A one-route handler that echoes the request it received."""
-
-    received: dict[str, Any] = {}
-
-    def do_GET(self) -> None:  # noqa: N802 - http.server's own naming
-        """Answer 200 with a JSON body, echoing the Authorization header."""
-        type(self).received = {
-            "path": self.path,
-            "authorization": self.headers.get("Authorization"),
-        }
-        body = b'{"items": []}'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_DELETE(self) -> None:  # noqa: N802 - http.server's own naming
-        """Answer 404 so the error path is exercised."""
-        body = b'{"reason": "NotFound"}'
-        self.send_response(404)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - http.server's signature
-        """Stay quiet; the test asserts on the response, not on a log."""
-        del format, args
-
-
-@pytest.fixture()
-def plain_server() -> Iterator[str]:
-    """Serve the handler on a loopback port for the duration of a test.
-
-    Yields:
-        The server's base URL.
-    """
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-
-def test_the_default_transport_speaks_http_and_sends_its_token(plain_server: str) -> None:
-    """Without an injected transport the client really does perform the request."""
-    client = KubernetesClient(server=plain_server, token="t0ken", timeout=5)
-
-    payload = client.json("GET", "/api/v1/nodes?limit=1")
-
-    assert payload == {"items": []}
-    assert _Handler.received["path"] == "/api/v1/nodes?limit=1"
-    assert _Handler.received["authorization"] == "Bearer t0ken"
-
-
-def test_the_default_transport_surfaces_an_http_error(plain_server: str) -> None:
-    """An HTTP error status is returned rather than raised by the transport."""
-    client = KubernetesClient(server=plain_server, timeout=5)
-
-    with pytest.raises(ApiRequestError):
-        client.json("DELETE", "/api/v1/namespaces/edge/pods/x")
-
-
 def test_a_missing_token_file_is_not_an_error(tmp_path: Path) -> None:
     """A client without a service-account token can still be built."""
     built = KubernetesClient.from_environment(
@@ -208,8 +137,8 @@ def test_a_missing_token_file_is_not_an_error(tmp_path: Path) -> None:
         }
     )
 
-    assert built.token is None
-    assert built.ca_path is None
+    assert built.configuration.api_key.get("BearerToken") is None
+    assert built.configuration.ssl_ca_cert is None
 
 
 # -- translation -----------------------------------------------------------------

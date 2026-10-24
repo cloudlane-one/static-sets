@@ -39,11 +39,13 @@ emitted static Pod; see [placement and capacity](./about-placement-and-capacity.
 | `affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution` | Required node selector terms (`matchExpressions`, `matchFields`). |
 | `affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution` | Weighted preferred terms. |
 | `tolerations` | Tolerations installers carry. |
-| `topologySpreadConstraints` | `maxSkew`, `topologyKey`, `whenUnsatisfiable`, `labelSelector`, `minDomains`. |
+| `topologySpreadConstraints` | The upstream `V1TopologySpreadConstraint`: `maxSkew`, `topologyKey`, `whenUnsatisfiable` (default `DoNotSchedule`), `labelSelector`, `minDomains`, and the pass-through `matchLabelKeys`/`nodeAffinityPolicy`/`nodeTaintsPolicy`. |
 
-Pod affinity and anti-affinity are not supported: they describe co-location with other
-Pods, which a static Pod cannot honour because kubelet does not run the scheduler for
-it.
+The field types are the generated Kubernetes client models, so the CRD documents the
+scheduler API as Kubernetes defines it. The operator still refuses what it cannot act
+on, with the field named: pod affinity and anti-affinity, node-selector and
+label-selector operators outside the set it evaluates, toleration operators/effects
+outside the API server's set, and a preferred-term weight outside 1–100.
 
 ### `spec.update`
 

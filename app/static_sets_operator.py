@@ -29,10 +29,19 @@ import os
 from typing import Any
 
 import kopf
+from kubernetes.client import (
+    V1ConfigMap,
+    V1DaemonSet,
+    V1DeleteOptions,
+    V1Deployment,
+    V1Node,
+    V1ObjectMeta,
+    V1Pod,
+)
 
 import based_operators as bk  # noqa: F401 - the resource class carries the resource config
 
-from static_sets.api import ApiUnavailableError, JsonClient, KubernetesClient
+from static_sets.api import ApiUnavailableError, KubernetesClient, KubernetesObject, upsert
 from static_sets.controller import CleanupAction, ObservedState, ObservedWorkload, plan
 from static_sets.models import StaticSet
 from static_sets.naming import (
@@ -49,7 +58,7 @@ from static_sets.placement import InstallerPod, NodeInfo, ObservedPlacement
 from static_sets.validation import strict_problems
 
 __all__ = [
-    "JsonClient",
+    "KubernetesClient",
     "apply_plan",
     "read_snapshot",
     "reject_unsupported",
@@ -64,32 +73,22 @@ WEBHOOK_ENV = "STATIC_SETS_WEBHOOK"
 """The environment variable the chart uses to say whether admissions are served."""
 
 
-STATIC_SET_PATH = f"/apis/{GROUP}/{VERSION}/namespaces/{{namespace}}/{PLURAL}/{{name}}"
-"""The REST path of a StaticSet."""
-
-PODS_PATH = "/api/v1/namespaces/{namespace}/pods"
-"""The REST path of the Pod collection."""
-
-CONFIG_MAPS_PATH = "/api/v1/namespaces/{namespace}/configmaps"
-"""The REST path of the ConfigMap collection."""
-
-NODES_PATH = "/api/v1/nodes"
-"""The REST path of the Node collection."""
-
-APP_COLLECTIONS = (
-    "/apis/apps/v1/namespaces/{namespace}/deployments",
-    "/apis/apps/v1/namespaces/{namespace}/daemonsets",
-)
-"""Both installer workload collections, so a mode switch leaves nothing behind."""
-
 INSTALLER_COMPONENT = "installer"
 """Value of ``app.kubernetes.io/component`` on the installer workload."""
+
+_MODEL_FOR_KIND: dict[str, type[KubernetesObject]] = {
+    "ConfigMap": V1ConfigMap,
+    "Deployment": V1Deployment,
+    "DaemonSet": V1DaemonSet,
+    "Pod": V1Pod,
+}
+"""The official client's model for each kind the planner can emit."""
 
 TIMER_INTERVAL = 120
 """Seconds between periodic re-reconciles, so pending cleanups are retried."""
 
 
-def get_client() -> JsonClient:
+def get_client() -> KubernetesClient:
     """Return the API client the adapter uses.
 
     Returns:
@@ -110,7 +109,7 @@ def selector(**labels: str) -> str:
     return ",".join(f"{key}={value}" for key, value in sorted(labels.items()))
 
 
-def read_snapshot(client: JsonClient, resource: StaticSet) -> ObservedState:
+def read_snapshot(client: KubernetesClient, resource: StaticSet) -> ObservedState:
     """Read the cluster state a reconcile plan is computed from.
 
     Every read below is a synchronous list or get that raises on failure, so the
@@ -129,34 +128,29 @@ def read_snapshot(client: JsonClient, resource: StaticSet) -> ObservedState:
     """
     namespace = resource.metadata.namespace or "default"
     name = resource.metadata.name or ""
-    pods = client.json(
-        "GET",
-        PODS_PATH.format(namespace=namespace),
-        params={"labelSelector": f"{SET_LABEL}={name}"},
-        missing={},
+    pods = (
+        client.core.list_namespaced_pod(namespace, label_selector=f"{SET_LABEL}={name}").items or []
     )
-    nodes = client.json("GET", NODES_PATH, missing={})
-    config_maps = client.json(
-        "GET",
-        CONFIG_MAPS_PATH.format(namespace=namespace),
-        params={
-            "labelSelector": selector(**{COMPONENT_LABEL: PLACEMENT_COMPONENT, SET_LABEL: name})
-        },
-        missing={},
+    nodes = client.core.list_node().items or []
+    config_maps = (
+        client.core.list_namespaced_config_map(
+            namespace,
+            label_selector=selector(**{COMPONENT_LABEL: PLACEMENT_COMPONENT, SET_LABEL: name}),
+        ).items
+        or []
     )
-    items = (pods or {}).get("items", [])
     return ObservedState(
-        nodes=tuple(_node(item) for item in (nodes or {}).get("items", [])),
+        nodes=tuple(_node(node) for node in nodes),
         installer_pods=tuple(
-            pod for pod in (_installer_pod(item) for item in items) if pod is not None
+            pod for pod in (_installer_pod(item) for item in pods) if pod is not None
         ),
         placements=tuple(
             placement
-            for placement in (_placement(item) for item in (config_maps or {}).get("items", []))
+            for placement in (_placement(config_map) for config_map in config_maps)
             if placement is not None
         ),
         workloads=tuple(
-            workload for workload in (_mirror_pod(item) for item in items) if workload is not None
+            workload for workload in (_mirror_pod(item) for item in pods) if workload is not None
         ),
         synced=True,
         observed_at=_now(),
@@ -164,7 +158,7 @@ def read_snapshot(client: JsonClient, resource: StaticSet) -> ObservedState:
 
 
 def apply_plan(
-    client: JsonClient,
+    client: KubernetesClient,
     resource: StaticSet,
     state: ObservedState,
     namespace: str,
@@ -184,14 +178,12 @@ def apply_plan(
     if result.delete_workload:
         _delete_installers(client, namespace=namespace, name=resource.metadata.name or "")
     elif result.workload is not None:
-        kind, manifest = result.workload
-        path = _workload_path(kind, namespace=namespace, name=manifest["metadata"]["name"])
-        _apply(client, path, manifest)
+        _, manifest = result.workload
+        _apply(client, namespace, manifest)
     for action in result.cleanup:
         _publish_intent(client, namespace, action)
         if action.worker is not None:
-            worker_name = action.worker["metadata"]["name"]
-            _apply(client, f"{PODS_PATH.format(namespace=namespace)}/{worker_name}", action.worker)
+            _apply(client, namespace, action.worker)
     return result
 
 
@@ -239,87 +231,85 @@ def reject_unsupported(body: dict[str, Any], **_: Any) -> None:
         raise kopf.AdmissionError("; ".join(problems))
 
 
-def _node(item: dict[str, Any]) -> NodeInfo:
+def _node(node: V1Node) -> NodeInfo:
     """Convert one API node into the shape the planner expects.
 
     Args:
-        item: The raw node.
+        node: The node, as the official client models it.
 
     Returns:
         The node.
     """
-    metadata = item.get("metadata", {})
-    conditions = item.get("status", {}).get("conditions", [])
+    conditions = (node.status.conditions if node.status else None) or []
     ready = any(
-        condition.get("type") == "Ready" and condition.get("status") == "True"
-        for condition in conditions
+        condition.type == "Ready" and condition.status == "True" for condition in conditions
     )
+    metadata = node.metadata
     return NodeInfo(
-        name=metadata.get("name", ""),
-        labels=metadata.get("labels") or {},
-        unschedulable=bool(item.get("spec", {}).get("unschedulable")),
+        name=(metadata.name if metadata else None) or "",
+        labels=(metadata.labels if metadata else None) or {},
+        unschedulable=bool(node.spec.unschedulable) if node.spec else False,
         ready=ready,
     )
 
 
-def _installer_pod(item: dict[str, Any]) -> InstallerPod | None:
+def _installer_pod(pod: V1Pod) -> InstallerPod | None:
     """Convert one API Pod into an installer Pod, when it is one.
 
     Args:
-        item: The raw Pod.
+        pod: The Pod, as the official client models it.
 
     Returns:
         The installer Pod, or ``None`` when the Pod is not a live installer.
     """
-    metadata = item.get("metadata", {})
-    labels = metadata.get("labels") or {}
-    if labels.get(COMPONENT_LABEL) != INSTALLER_COMPONENT:
+    metadata = pod.metadata
+    annotations = (metadata.annotations if metadata else None) or {}
+    if ((metadata.labels if metadata else None) or {}).get(COMPONENT_LABEL) != INSTALLER_COMPONENT:
         return None
-    if MIRROR_ANNOTATION in (metadata.get("annotations") or {}):
+    if MIRROR_ANNOTATION in annotations:
         return None
     return InstallerPod(
-        name=metadata.get("name", ""),
-        uid=metadata.get("uid", ""),
-        node=item.get("spec", {}).get("nodeName"),
-        phase=item.get("status", {}).get("phase", "Pending"),
-        deleting=metadata.get("deletionTimestamp") is not None,
+        name=(metadata.name if metadata else None) or "",
+        uid=(metadata.uid if metadata else None) or "",
+        node=pod.spec.node_name if pod.spec else None,
+        phase=(pod.status.phase if pod.status else None) or "Pending",
+        deleting=bool(metadata.deletion_timestamp) if metadata else False,
     )
 
 
-def _mirror_pod(item: dict[str, Any]) -> ObservedWorkload | None:
+def _mirror_pod(pod: V1Pod) -> ObservedWorkload | None:
     """Convert one API Pod into observed workload health, when it is a mirror Pod.
 
     Args:
-        item: The raw Pod.
+        pod: The Pod, as the official client models it.
 
     Returns:
         The observed workload, or ``None`` when the Pod is not a mirror Pod.
     """
-    metadata = item.get("metadata", {})
-    if MIRROR_ANNOTATION not in (metadata.get("annotations") or {}):
+    metadata = pod.metadata
+    if MIRROR_ANNOTATION not in ((metadata.annotations if metadata else None) or {}):
         return None
-    status = item.get("status", {})
-    containers = status.get("containerStatuses") or []
-    ready = all(container.get("ready") for container in containers) if containers else None
+    containers = (pod.status.container_statuses if pod.status else None) or []
+    ready = all(container.ready for container in containers) if containers else None
     return ObservedWorkload(
-        name=metadata.get("name", ""),
-        node=item.get("spec", {}).get("nodeName", ""),
-        phase=status.get("phase"),
+        name=(metadata.name if metadata else None) or "",
+        node=(pod.spec.node_name if pod.spec else None) or "",
+        phase=pod.status.phase if pod.status else None,
         ready=ready,
-        restart_count=sum(container.get("restartCount", 0) for container in containers),
+        restart_count=sum(container.restart_count or 0 for container in containers),
     )
 
 
-def _placement(item: dict[str, Any]) -> ObservedPlacement | None:
+def _placement(config_map: V1ConfigMap) -> ObservedPlacement | None:
     """Convert one placement ConfigMap into an observed placement.
 
     Args:
-        item: The raw ConfigMap.
+        config_map: The ConfigMap, as the official client models it.
 
     Returns:
         The observed placement, or ``None`` when the ConfigMap is not a placement.
     """
-    data = item.get("data") or {}
+    data = config_map.data or {}
     if not data.get("placement"):
         return None
     return ObservedPlacement(
@@ -332,38 +322,23 @@ def _placement(item: dict[str, Any]) -> ObservedPlacement | None:
     )
 
 
-def _workload_path(kind: str, *, namespace: str, name: str) -> str:
-    """Return the API path of an installer workload.
-
-    Args:
-        kind: ``Deployment`` or ``DaemonSet``.
-        namespace: The namespace.
-        name: The workload's name.
-
-    Returns:
-        The API path.
-    """
-    collection = APP_COLLECTIONS[0] if kind == "Deployment" else APP_COLLECTIONS[1]
-    return f"{collection.format(namespace=namespace)}/{name}"
-
-
-def _apply(client: JsonClient, path: str, manifest: dict[str, Any]) -> None:
+def _apply(client: KubernetesClient, namespace: str, manifest: dict[str, Any]) -> None:
     """Create or replace an object, leaving it in the desired shape.
+
+    The manifest is the planner's own output, which is already validated. It is
+    turned into the official client's model for its kind, so that serialization is
+    the client's job and a field this operator does not model is not guessed at.
 
     Args:
         client: The API client.
-        path: The object's API path.
+        namespace: The namespace the object belongs to.
         manifest: The desired object.
     """
-    existing = client.json("GET", path, missing={})
-    if existing:
-        manifest["metadata"]["resourceVersion"] = existing["metadata"]["resourceVersion"]
-        client.json("PUT", path, body=manifest)
-    else:
-        client.json("POST", path.rsplit("/", 1)[0], body=manifest)
+    model = _MODEL_FOR_KIND[manifest["kind"]].model_validate(manifest)
+    upsert(client, namespace, model)
 
 
-def _delete_installers(client: JsonClient, *, namespace: str, name: str) -> None:
+def _delete_installers(client: KubernetesClient, *, namespace: str, name: str) -> None:
     """Delete both installer workload kinds, so a mode switch leaves nothing behind.
 
     Args:
@@ -371,19 +346,32 @@ def _delete_installers(client: JsonClient, *, namespace: str, name: str) -> None
         namespace: The namespace the StaticSet lives in.
         name: The StaticSet's name.
     """
-    query = {"labelSelector": f"{SET_LABEL}={name}"}
-    for collection in APP_COLLECTIONS:
-        path = collection.format(namespace=namespace)
-        listing = client.json("GET", path, params=query, missing={})
-        for item in (listing or {}).get("items", []):
-            client.json(
-                "DELETE",
-                f"{path}/{item['metadata']['name']}",
-                body={"propagationPolicy": "Background"},
+    options = V1DeleteOptions(propagation_policy="Background")
+    deployments = (
+        client.apps.list_namespaced_deployment(
+            namespace, label_selector=f"{SET_LABEL}={name}"
+        ).items
+        or []
+    )
+    for deployment in deployments:
+        if deployment.metadata and deployment.metadata.name:
+            client.apps.delete_namespaced_deployment(
+                deployment.metadata.name, namespace, body=options
+            )
+    daemon_sets = (
+        client.apps.list_namespaced_daemon_set(
+            namespace, label_selector=f"{SET_LABEL}={name}"
+        ).items
+        or []
+    )
+    for daemon_set in daemon_sets:
+        if daemon_set.metadata and daemon_set.metadata.name:
+            client.apps.delete_namespaced_daemon_set(
+                daemon_set.metadata.name, namespace, body=options
             )
 
 
-def _publish_intent(client: JsonClient, namespace: str, action: CleanupAction) -> None:
+def _publish_intent(client: KubernetesClient, namespace: str, action: CleanupAction) -> None:
     """Publish a cleanup intent so the node can learn of it.
 
     The controller has no host access, so the intent travels through the API: the
@@ -397,22 +385,25 @@ def _publish_intent(client: JsonClient, namespace: str, action: CleanupAction) -
     """
     static_set = action.payload["staticSet"]
     name = placement_configmap_name(static_set, action.identity)
-    manifest = {
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-            "labels": {
-                "app.kubernetes.io/managed-by": MANAGED_BY,
-                COMPONENT_LABEL: PLACEMENT_COMPONENT,
-                SET_LABEL: static_set,
-                PLACEMENT_LABEL: action.identity,
-            },
-        },
-        "data": dict(action.payload),
-    }
-    _apply(client, f"{CONFIG_MAPS_PATH.format(namespace=namespace)}/{name}", manifest)
+    upsert(
+        client,
+        namespace,
+        V1ConfigMap(
+            api_version="v1",
+            kind="ConfigMap",
+            metadata=V1ObjectMeta(
+                name=name,
+                namespace=namespace,
+                labels={
+                    "app.kubernetes.io/managed-by": MANAGED_BY,
+                    COMPONENT_LABEL: PLACEMENT_COMPONENT,
+                    SET_LABEL: static_set,
+                    PLACEMENT_LABEL: action.identity,
+                },
+            ),
+            data=dict(action.payload),
+        ),
+    )
 
 
 @StaticSet.on.create
