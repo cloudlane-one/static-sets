@@ -35,18 +35,29 @@ app.kubernetes.io/name: {{ include "static-sets.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* The manager DaemonSet's selector labels: distinct from the controller's. */}}
+{{- define "static-sets.managerSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "static-sets.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: node-manager
+{{- end -}}
+
 {{- define "static-sets.serviceAccountName" -}}
 {{- printf "%s-controller" (include "static-sets.fullname" .) -}}
 {{- end -}}
 
-{{/* The ServiceAccount the installer Pods run as. */}}
-{{- define "static-sets.installerServiceAccountName" -}}
-{{- default (printf "%s-installer" (include "static-sets.fullname" .)) .Values.installer.serviceAccountName -}}
+{{/* The ServiceAccount the manager DaemonSet runs as. */}}
+{{- define "static-sets.managerServiceAccountName" -}}
+{{- default (printf "%s-manager" (include "static-sets.fullname" .)) .Values.manager.serviceAccountName -}}
 {{- end -}}
 
-{{/* The namespace the operator watches and creates objects in. */}}
-{{- define "static-sets.watchNamespace" -}}
-{{- default .Release.Namespace .Values.watchNamespace -}}
+{{/* The manager image, defaulting to the controller's. */}}
+{{- define "static-sets.managerImage" -}}
+{{- printf "%s:%s" (default .Values.image.repository .Values.manager.image.repository) (default .Values.image.tag .Values.manager.image.tag) -}}
+{{- end -}}
+
+{{- define "static-sets.managerImagePullPolicy" -}}
+{{- default .Values.image.pullPolicy .Values.manager.image.pullPolicy -}}
 {{- end -}}
 
 {{/* The TLS secret cert-manager fills for the admission webhook. */}}

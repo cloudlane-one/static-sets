@@ -2,21 +2,26 @@
 
 A StaticSet asks for a set of *static Pods*: Pod definitions that are persisted on
 a host and started by that host's kubelet, so that they come back after a reboot
-with no Kubernetes API access. The operator realises the request by scheduling
-*installer* Pods (a Deployment or a DaemonSet) whose containers place the compiled
-static workload on their own node.
+with no Kubernetes API access. The operator realises the request in two steps: the
+central controller asks the Kubernetes scheduler where the workload should go by
+creating a *scheduling probe* (a ReplicaSet or a DaemonSet whose Pods are scheduled
+but can never run), and the per-node ``static-pod-manager`` then writes the compiled
+static workload on the node the probe was placed on.
 
 The specification is deliberately explicit about three things a static Pod cannot
 inherit from the API server: placement, update policy and offline-retention
 policy. Nothing is defaulted silently where a wrong default would be unsafe.
+
+Where the static workload lives on the node — the kubelet static Pod directory and
+the persistent bundle directory — is a property of the manager that owns that node,
+not of an individual StaticSet, so it is configured by the chart rather than in
+``spec``.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
 from enum import StrEnum
-from pathlib import Path
 from typing import Literal
 
 from kubernetes import client as k8s
@@ -25,7 +30,7 @@ from pydantic import Field, model_validator
 import based_operators as bk
 
 from static_sets.base import WireModel
-from static_sets.workload import PodTemplate, PullPolicy, ResourceRequirements
+from static_sets.workload import PodTemplate
 
 __all__ = [
     "Affinity",
@@ -35,7 +40,6 @@ __all__ = [
     "CleanupState",
     "Condition",
     "ImageProvisioning",
-    "InstallerSpec",
     "LabelSelector",
     "Mode",
     "NodeAffinity",
@@ -61,10 +65,21 @@ __all__ = [
 
 
 class Mode(StrEnum):
-    """How many installers the operator creates, and where they land."""
+    """How many placements the operator asks the scheduler for."""
 
     DEPLOYMENT = "Deployment"
+    """A fixed number of placements, wherever the scheduler puts them.
+
+    Realised by a ReplicaSet: the operator wants the scheduler's decision, not a
+    Deployment's own rollout machinery, which the controller sequences itself.
+    """
+
     DAEMON_SET = "DaemonSet"
+    """One placement on every node the placement filters admit.
+
+    Realised by a DaemonSet, which is the object whose whole purpose is "one per
+    node" and which keeps noticing nodes that join.
+    """
 
 
 class UpdateStrategy(StrEnum):
@@ -402,61 +417,6 @@ class WorkloadPolicy(WireModel):
     """
 
 
-class InstallerSpec(WireModel):
-    """The installer image and the exact host paths it is allowed to touch."""
-
-    image: str = Field(min_length=1)
-    image_pull_policy: PullPolicy = PullPolicy.IF_NOT_PRESENT
-    static_pod_path: str = Field(default="/etc/kubernetes/manifests", min_length=1)
-    """kubelet's ``staticPodPath``: where it watches for Pod manifests.
-
-    The operator only reads this value to validate and to place files; it never
-    writes kubelet configuration.
-    """
-
-    bundle_dir: str = Field(default="/var/lib/static-sets", min_length=1)
-    """The persistent bundle directory the installer owns.
-
-    Holds persisted placement records, revision directories and temporary files.
-    Must live outside :attr:`static_pod_path`, because kubelet watches that
-    directory and would try to start a half-written temporary file.
-    """
-
-    resources: ResourceRequirements | None = None
-    """The installer container's resource reservation.
-
-    Unset means a small fixed reservation (see the installer placement guide): the
-    installer only writes files, and the static workload's own requests are not
-    visible to the scheduler, so copying them onto the installer would double-count
-    capacity without making placement decisions any more accurate.
-    """
-
-    @model_validator(mode="after")
-    def _check_paths(self) -> InstallerSpec:
-        """Validate the two host paths.
-
-        Returns:
-            The validated installer specification.
-
-        Raises:
-            DefinitionError: If either path is relative, or the two overlap.
-        """
-        for field in ("static_pod_path", "bundle_dir"):
-            value: str = getattr(self, field)
-            if not _is_absolute_path(value):
-                raise ValueError(f"installer.{field} must be an absolute path, got {value!r}")
-        static = Path(self.static_pod_path)
-        bundle = Path(self.bundle_dir)
-        if _is_within(static, bundle) or _is_within(bundle, static):
-            raise ValueError(
-                f"installer.static_pod_path ({self.static_pod_path!r}) and "
-                f"installer.bundle_dir ({self.bundle_dir!r}) must be disjoint: kubelet "
-                "watches the static Pod path, so temporary and backup files must not "
-                "live beneath it"
-            )
-        return self
-
-
 class StaticSetSpec(WireModel):
     """What a user asks for."""
 
@@ -473,7 +433,6 @@ class StaticSetSpec(WireModel):
     offline: OfflinePolicy = Field(default_factory=OfflinePolicy)
     cleanup: CleanupPolicy = Field(default_factory=CleanupPolicy)
     policy: WorkloadPolicy = Field(default_factory=WorkloadPolicy)
-    installer: InstallerSpec
 
     @model_validator(mode="after")
     def _check_replicas(self) -> StaticSetSpec:
@@ -497,28 +456,44 @@ class StaticSetSpec(WireModel):
 
 
 class PlacementPhase(StrEnum):
-    """The lifecycle of one installer placement."""
+    """The lifecycle of one placement."""
 
     PENDING = "Pending"
+    """The scheduler has not chosen a node for it yet."""
+
+    INSTALLING = "Installing"
+    """A node is known; its manager is writing the static Pod."""
+
     INSTALLED = "Installed"
+    """The manager confirmed the revision is durably installed locally."""
+
+    RETIRING = "Retiring"
+    """A newer revision is running and this one is being removed (``Surge``)."""
+
     CLEANING = "Cleaning"
+    """The placement is no longer wanted and its removal is in progress."""
+
     CLEANED = "Cleaned"
+    """The static Pod is gone, as confirmed by the node's manager."""
+
     FAILED = "Failed"
 
 
 class PlacementStatus(WireModel):
-    """The installed state of one placement, as acknowledged by its installer."""
+    """The installed state of one placement, as acknowledged by its node's manager."""
 
     identity: str
-    """The placement identity: stable across installer restarts and revisions."""
+    """The placement identity: stable across manager restarts and revisions."""
 
     node: str
     revision: str | None = None
     phase: PlacementPhase = PlacementPhase.PENDING
     acknowledged: bool = False
-    """Whether the installer confirmed the revision is durably installed locally."""
+    """Whether the manager confirmed the revision is durably installed locally."""
 
     generation: int = 0
+    """The StaticSet generation the reported state was produced for."""
+
     message: str | None = None
 
 
@@ -549,16 +524,13 @@ class CleanupReason(StrEnum):
 
 
 class CleanupState(StrEnum):
-    """Where a cleanup intent is in the protocol of section 7."""
+    """Where a cleanup intent stands."""
 
     REQUESTED = "Requested"
-    """Persisted, and the installer has been asked to perform it."""
-
-    QUEUED = "Queued"
-    """The installer is gone; a cleanup worker pinned to the node is needed."""
+    """Persisted on the placement, and the node's manager has been asked to act."""
 
     ACKNOWLEDGED = "Acknowledged"
-    """The installer or worker confirmed the manifest is gone."""
+    """The node's manager confirmed the manifest is gone."""
 
     BLOCKED = "Blocked"
     """The node is unreachable, so cleanup cannot be confirmed."""
@@ -595,6 +567,15 @@ class StaticSetStatus(WireModel):
     """What the operator reports about a StaticSet."""
 
     observed_generation: int = 0
+    placed_generation: int = 0
+    """The generation a complete scheduling pass has been carried out for.
+
+    Placement is decided by asking the scheduler once per generation, which is what
+    keeps a spec change from creating a probe on every reconcile. Recording the
+    generation that was placed is what stops the operator from starting another
+    pass, while still noticing a shortfall, a new node or a new generation.
+    """
+
     desired_revision: str | None = None
     placements: list[PlacementStatus] = Field(default_factory=list)
     health: list[WorkloadHealth] = Field(default_factory=list)
@@ -602,42 +583,8 @@ class StaticSetStatus(WireModel):
     conditions: list[Condition] = Field(default_factory=list)
 
 
-def _is_absolute_path(value: str) -> bool:
-    """Return whether a declared host path is absolute.
-
-    A Kubernetes-declared path is a POSIX path, so a leading slash is the test that
-    matters; a Windows drive path is also accepted so that the same code can be
-    exercised on a developer's machine.
-
-    Args:
-        value: The declared path.
-
-    Returns:
-        ``True`` when the path is absolute.
-    """
-    return value.startswith("/") or Path(value).is_absolute()
-
-
-def _is_within(inner: Path, outer: Path) -> bool:
-    """Return whether one path is the other or lies inside it.
-
-    Uses the platform's own path semantics, so it validates a Linux host layout and
-    a developer's working copy with the same code.
-
-    Args:
-        inner: The candidate child path.
-        outer: The candidate parent path.
-
-    Returns:
-        ``True`` when ``inner`` is ``outer`` or a descendant of it.
-    """
-    if os.path.normcase(str(inner)) == os.path.normcase(str(outer)):
-        return True
-    return Path(os.path.normcase(str(inner))).is_relative_to(Path(os.path.normcase(str(outer))))
-
-
 class StaticSet(bk.CustomResource[StaticSetSpec, StaticSetStatus]):
-    """A namespaced set of static Pods, managed through installer Pods."""
+    """A namespaced set of static Pods, placed by the scheduler and written per node."""
 
     resource_config = bk.ResourceConfig(
         group="staticsets.cloudlane.dev",

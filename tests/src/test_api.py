@@ -19,7 +19,7 @@ import pytest
 from kubernetes.client import Configuration, V1ConfigMap, V1Node, V1ObjectMeta
 
 from static_sets.api import ApiRequestError, KubernetesClient, or_none, upsert
-from static_sets.installer import ApiUnavailableError
+from static_sets.errors import ApiUnavailableError
 from static_sets.validation import strict_problems
 
 

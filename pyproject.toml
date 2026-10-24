@@ -6,11 +6,11 @@ license = "MIT"
 requires-python = ">=3.13,<4"
 dependencies = [
     "based-operators @ git+https://github.com/cloudlane-one/based-operators.git@main",
-    # kopf is imported directly by the operator entry point, so it is declared here
-    # rather than relied on as a transitive dependency of based-operators.
+    # kopf is imported directly by both entry points, so it is declared here rather
+    # than relied on as a transitive dependency of based-operators.
     "kopf>=1.44.6,<2.0.0",
     # The official Kubernetes client (pydantic models since v37) is what the operator
-    # and the installer talk to the API server through.
+    # and the node manager talk to the API server through.
     "kubernetes>=37.0.1,<38.0.0",
     "pydantic>=2.11.0,<3.0.0",
     # Both entry points are Typer applications, so the command definitions and the
@@ -22,7 +22,7 @@ dependencies = [
 dynamic = ["version"]
 
 [project.scripts]
-static-set-installer = "static_sets_installer.__main__:main"
+static-set-manager = "static_sets_manager:main"
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
@@ -33,9 +33,10 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-# The library lives in `/src`; the installer front end is its own top-level
-# package in `/app` so that `static-set-installer` ships in the wheel.
-packages = ["src/static_sets", "app/static_sets_installer"]
+# The library lives in `/src`; the manager's command-line front end is its own
+# top-level package in `/app` so that `static-set-manager` ships in the wheel. The
+# two kopf entry points are plain modules there, loaded by path.
+packages = ["src/static_sets", "app/static_sets_manager"]
 
 [dependency-groups]
 # Everything needed in CI/CD pipelines, which includes all dev dependencies + release tooling.
@@ -134,7 +135,7 @@ reportOverlappingOverload = true
 line-length = 100
 
 [tool.deptry]
-known_first_party = ["static_sets", "static_sets_installer"]
+known_first_party = ["static_sets", "static_sets_manager"]
 non_dev_dependency_groups = ["app"]
 
 [tool.deptry.per_rule_ignores]

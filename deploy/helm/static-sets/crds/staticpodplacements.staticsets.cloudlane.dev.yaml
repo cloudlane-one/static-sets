@@ -1,0 +1,130 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: staticpodplacements.staticsets.cloudlane.dev
+spec:
+  group: staticsets.cloudlane.dev
+  scope: Namespaced
+  names:
+    plural: staticpodplacements
+    kind: StaticPodPlacement
+    listKind: StaticPodPlacementList
+    singular: staticpodplacement
+    shortNames:
+    - spp
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        description: A namespaced record of one node's static Pod for one StaticSet.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: What the controller has decided about one placement.
+            properties:
+              staticSet:
+                minLength: 1
+                title: Staticset
+                type: string
+              staticSetUid:
+                minLength: 1
+                title: Staticsetuid
+                type: string
+              node:
+                minLength: 1
+                title: Node
+                type: string
+              generation:
+                default: 0
+                minimum: 0
+                title: Generation
+                type: integer
+              desired:
+                default: true
+                title: Desired
+                type: boolean
+              reason:
+                description: Why a placement is being cleaned up.
+                enum:
+                - ScaledDown
+                - Deselected
+                - Relocated
+                - ResourceDeleted
+                title: CleanupReason
+                type: string
+                nullable: true
+              removeConfiguration:
+                default: true
+                title: Removeconfiguration
+                type: boolean
+            required:
+            - staticSet
+            - staticSetUid
+            - node
+            title: PlacementSpec
+            type: object
+          status:
+            description: What the node's manager reports about one placement.
+            properties:
+              identity:
+                title: Identity
+                type: string
+                nullable: true
+              revision:
+                title: Revision
+                type: string
+                nullable: true
+              staticPodName:
+                title: Staticpodname
+                type: string
+                nullable: true
+              phase:
+                description: The lifecycle of one placement.
+                enum:
+                - Pending
+                - Installing
+                - Installed
+                - Retiring
+                - Cleaning
+                - Cleaned
+                - Failed
+                title: PlacementPhase
+                type: string
+                default: Pending
+              acknowledged:
+                default: false
+                title: Acknowledged
+                type: boolean
+              observedGeneration:
+                default: 0
+                title: Observedgeneration
+                type: integer
+              message:
+                title: Message
+                type: string
+                nullable: true
+              warnings:
+                items:
+                  type: string
+                title: Warnings
+                type: array
+              updatedAt:
+                title: Updatedat
+                type: string
+                nullable: true
+            title: PlacementState
+            type: object
+            nullable: true
+        required:
+        - spec
+        title: StaticPodPlacement
+        type: object
+    subresources:
+      status: {}

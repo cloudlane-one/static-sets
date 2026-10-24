@@ -5,7 +5,7 @@ set — as the CI image-smoke job does — and a Docker daemon is reachable.
 
 What it proves is what only a real image can: that the project installs, that both
 entry points are present and runnable inside the container, and that the console
-script the chart's installer Pods invoke is on ``PATH``.
+script an operator reaches for on a node is on ``PATH``.
 """
 
 from __future__ import annotations
@@ -78,60 +78,80 @@ def _inside(image: str, *args: str, check: bool = True) -> subprocess.CompletedP
 
 
 def test_the_library_is_installed(image: str) -> None:
-    """The wheel ships the library and the installer package."""
+    """The wheel ships the library and the manager package."""
     result = _inside(
         image,
         "python",
         "-c",
-        "import static_sets, static_sets_installer; print(static_sets.__name__)",
+        "import static_sets, static_sets_manager; print(static_sets.__name__)",
     )
 
     assert result.stdout.strip() == "static_sets"
 
 
-def test_the_console_script_the_chart_uses_is_on_path(image: str) -> None:
-    """Installer Pods run ``static-set-installer``, so it has to exist in the image."""
-    result = _inside(image, "static-set-installer", "--help")
+def test_the_console_script_an_operator_uses_is_on_path(image: str) -> None:
+    """``static-set-manager`` is what a manual pass on a node runs, so it must exist."""
+    result = _inside(image, "static-set-manager", "--help")
 
     assert result.returncode == 0
     assert "reconcile" in result.stdout
 
 
-def test_the_controller_is_installed(image: str) -> None:
-    """kopf is present, which is what the image's command runs."""
+def test_kopf_is_installed(image: str) -> None:
+    """Both entry points are kopf applications, and kopf is what the image runs."""
     result = _inside(image, "kopf", "--version")
 
     assert result.returncode == 0
 
 
-def test_the_entry_point_and_the_installer_module_both_run(image: str) -> None:
-    """Both halves of the operator start inside the image."""
+def test_both_entry_points_start_inside_the_image(image: str) -> None:
+    """Both halves of the operator load their handlers without a cluster."""
     controller = _inside(
         image, "python", "-c", "import runpy; runpy.run_path('app/static_sets_operator.py')"
     )
-    installer = _inside(image, "static-set-installer", "reconcile", check=False)
+    # The manager reads its node at import time: without one it must refuse loudly
+    # rather than start and guess which host it owns.
+    manager = _inside(
+        image,
+        "python",
+        "-c",
+        "import runpy; runpy.run_path('app/static_pod_manager.py')",
+        check=False,
+    )
 
     assert controller.returncode == 0, controller.stderr
-    # No cluster and no environment: the installer must fail cleanly, not hang or
-    # traceback into an unknown state.
-    assert installer.returncode == 2, installer.stdout + installer.stderr
-    assert "invalid-environment" in installer.stdout
+    assert manager.returncode != 0
+    assert "names no node" in manager.stderr
 
 
-def test_the_crd_is_rendered_from_the_installed_library(image: str) -> None:
-    """The shipped models render the CRD the cluster will be given."""
+def test_the_manager_command_fails_cleanly_without_an_environment(image: str) -> None:
+    """No node and no cluster: report it and exit, do not hang or traceback."""
+    result = _inside(image, "static-set-manager", "reconcile", check=False)
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "invalid-environment" in result.stdout
+
+
+def test_the_crds_are_rendered_from_the_installed_library(image: str) -> None:
+    """The shipped models render both CRDs the cluster will be given."""
     result = _inside(
         image,
         "python",
         "-c",
-        "from based_operators import crd_manifest; from static_sets.models import StaticSet;"
-        "print(crd_manifest(StaticSet)['metadata']['name'])",
+        "from based_operators import crd_manifest;"
+        "from static_sets.models import StaticSet;"
+        "from static_sets.placements import StaticPodPlacement;"
+        "print(crd_manifest(StaticSet)['metadata']['name']);"
+        "print(crd_manifest(StaticPodPlacement)['metadata']['name'])",
     )
 
-    assert result.stdout.strip() == "staticsets.staticsets.cloudlane.dev"
+    assert result.stdout.split() == [
+        "staticsets.staticsets.cloudlane.dev",
+        "staticpodplacements.staticsets.cloudlane.dev",
+    ]
 
 
-# The committed CRD is compared against the models the installed library renders by
+# The committed CRDs are compared against the models the installed library renders by
 # tests/app/test_manifests.py, which runs against the same wheel in the project's
 # virtual environment. The image deliberately does not carry the chart, so that check
 # stays where the chart is.

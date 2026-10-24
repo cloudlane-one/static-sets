@@ -14,10 +14,12 @@ you already know; the operator compiles it into a self-contained Pod, materializ
 the configuration it references on the node, writes it durably where kubelet looks,
 and keeps it in step as the template and its configuration change.
 
-The workload itself is never scheduled by Kubernetes. Instead the operator creates
-*installer* Pods — a Deployment or a DaemonSet — and each installer writes the
-workload onto its own node. Everything the installer needs is explicit: its node,
-its placement, the paths it may touch, and the revision it owns.
+The workload itself is never scheduled by Kubernetes, but its *placement* is: the
+controller creates a temporary *scheduling probe* that the cluster's scheduler places
+and that no node can start, and the node each probe Pod landed on then gets the real
+static Pod from that node's manager. Two long-lived processes do the work — one
+cluster-wide controller and one manager per node — and neither of them decides anything
+the other could get wrong.
 
 ## Start here
 

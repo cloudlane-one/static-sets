@@ -1,16 +1,17 @@
-"""The StaticSet operator entry point.
+"""The StaticSet controller entry point.
 
-This is the file ``kopf run`` executes inside the controller image. It does two
-things and nothing else: it reads the cluster into an
+This is the file ``kopf run`` executes inside the controller image, and it is
+registered cluster-wide: it watches ``StaticSet`` objects in every namespace. It
+does two things and nothing else: it reads the cluster into an
 :class:`~static_sets.controller.ObservedState`, and it applies the
 :class:`~static_sets.controller.ReconcilePlan` that
 :func:`~static_sets.controller.plan` derives from it. Every decision lives in the
 library, where it is unit-tested; this module is only the adapter that talks to
 Kubernetes.
 
-The controller never touches a host filesystem. Static Pods are written by the
-*installer* Pods it creates, and a placement whose installer is gone is cleaned up
-by a restricted cleanup worker pinned to the node. The controller's job is to decide
+The controller never touches a host filesystem. Placement is decided by the
+Kubernetes scheduler through a probe workload; the manifests are written by the
+``static-pod-manager`` DaemonSet, one Pod per node. The controller's job is to decide
 what should exist and to report what it observed.
 
 A validating admission webhook is registered alongside the reconciler — but only when
@@ -26,35 +27,47 @@ from __future__ import annotations
 
 import datetime
 import os
-from typing import Any
+from typing import Any, cast
 
 import kopf
 from kubernetes.client import (
-    V1ConfigMap,
     V1DaemonSet,
     V1DeleteOptions,
-    V1Deployment,
-    V1Node,
-    V1ObjectMeta,
     V1Pod,
+    V1ReplicaSet,
 )
 
-import based_operators as bk  # noqa: F401 - the resource class carries the resource config
+import based_operators as bk  # the resource class carries the resource config
 
-from static_sets.api import ApiUnavailableError, KubernetesClient, KubernetesObject, upsert
-from static_sets.controller import CleanupAction, ObservedState, ObservedWorkload, plan
-from static_sets.models import StaticSet
+from static_sets.api import (
+    ApiRequestError,
+    ApiUnavailableError,
+    KubernetesClient,
+    KubernetesObject,
+    apply_placement,
+    delete_placement,
+    upsert,
+)
+from static_sets.controller import (
+    ObservedPlacement,
+    ObservedState,
+    PlacementChange,
+    ProbeRef,
+    plan,
+)
+from static_sets.models import PlacementPhase, StaticSet
 from static_sets.naming import (
-    MANAGED_BY,
-    MIRROR_ANNOTATION,
     COMPONENT_LABEL,
-    PLACEMENT_COMPONENT,
+    GENERATION_LABEL,
+    MIRROR_ANNOTATION,
     PLACEMENT_LABEL,
-    SET_LABEL,
+    PROBE_COMPONENT,
+    SET_UID_LABEL,
     STATIC_SET_FINALIZER,
-    placement_configmap_name,
+    placement_labels,
 )
-from static_sets.placement import InstallerPod, NodeInfo, ObservedPlacement
+from static_sets.placements import PlacementSpec, PlacementState, StaticPodPlacement
+from static_sets.probe import NodeInfo, ObservedProbePod, ObservedProbeWorkload, ObservedWorkload
 from static_sets.validation import strict_problems
 
 __all__ = [
@@ -72,20 +85,15 @@ PLURAL = "staticsets"
 WEBHOOK_ENV = "STATIC_SETS_WEBHOOK"
 """The environment variable the chart uses to say whether admissions are served."""
 
-
-INSTALLER_COMPONENT = "installer"
-"""Value of ``app.kubernetes.io/component`` on the installer workload."""
-
 _MODEL_FOR_KIND: dict[str, type[KubernetesObject]] = {
-    "ConfigMap": V1ConfigMap,
-    "Deployment": V1Deployment,
     "DaemonSet": V1DaemonSet,
+    "ReplicaSet": V1ReplicaSet,
     "Pod": V1Pod,
 }
 """The official client's model for each kind the planner can emit."""
 
 TIMER_INTERVAL = 120
-"""Seconds between periodic re-reconciles, so pending cleanups are retried."""
+"""Seconds between periodic re-reconciles, so a missing placement is noticed."""
 
 
 def get_client() -> KubernetesClient:
@@ -127,28 +135,14 @@ def read_snapshot(client: KubernetesClient, resource: StaticSet) -> ObservedStat
         ApiUnavailableError: If any read failed.
     """
     namespace = resource.metadata.namespace or "default"
-    name = resource.metadata.name or ""
-    pods = (
-        client.core.list_namespaced_pod(namespace, label_selector=f"{SET_LABEL}={name}").items or []
-    )
+    uid = resource.metadata.uid or ""
+    owned = selector(**{SET_UID_LABEL: uid})
+    pods = client.core.list_namespaced_pod(namespace, label_selector=owned).items or []
     nodes = client.core.list_node().items or []
-    config_maps = (
-        client.core.list_namespaced_config_map(
-            namespace,
-            label_selector=selector(**{COMPONENT_LABEL: PLACEMENT_COMPONENT, SET_LABEL: name}),
-        ).items
-        or []
-    )
     return ObservedState(
         nodes=tuple(_node(node) for node in nodes),
-        installer_pods=tuple(
-            pod for pod in (_installer_pod(item) for item in pods) if pod is not None
-        ),
-        placements=tuple(
-            placement
-            for placement in (_placement(config_map) for config_map in config_maps)
-            if placement is not None
-        ),
+        probes=_probes(client, namespace, owned=owned, pods=pods),
+        placements=_placements(client, namespace, owned=owned),
         workloads=tuple(
             workload for workload in (_mirror_pod(item) for item in pods) if workload is not None
         ),
@@ -175,15 +169,13 @@ def apply_plan(
         The plan that was applied, so the caller can publish its status.
     """
     result = plan(resource, state, namespace=namespace)
-    if result.delete_workload:
-        _delete_installers(client, namespace=namespace, name=resource.metadata.name or "")
-    elif result.workload is not None:
-        _, manifest = result.workload
+    for reference in result.delete_probes:
+        _delete_probe(client, namespace, reference)
+    if result.probe is not None:
+        _, manifest = result.probe
         _apply(client, namespace, manifest)
-    for action in result.cleanup:
-        _publish_intent(client, namespace, action)
-        if action.worker is not None:
-            _apply(client, namespace, action.worker)
+    for change in result.placements:
+        _apply_placement(client, resource, namespace, change)
     return result
 
 
@@ -196,6 +188,7 @@ def publish_status(patch: kopf.Patch, result: Any) -> None:
     """
     status = result.status.model_dump(mode="json", by_alias=True, exclude_none=True)
     patch.status["observedGeneration"] = status.get("observedGeneration", 0)
+    patch.status["placedGeneration"] = status.get("placedGeneration", 0)
     patch.status["placements"] = status.get("placements", [])
     patch.status["health"] = status.get("health", [])
     patch.status["cleanup"] = status.get("cleanup", [])
@@ -231,7 +224,7 @@ def reject_unsupported(body: dict[str, Any], **_: Any) -> None:
         raise kopf.AdmissionError("; ".join(problems))
 
 
-def _node(node: V1Node) -> NodeInfo:
+def _node(node: Any) -> NodeInfo:
     """Convert one API node into the shape the planner expects.
 
     Args:
@@ -253,27 +246,99 @@ def _node(node: V1Node) -> NodeInfo:
     )
 
 
-def _installer_pod(pod: V1Pod) -> InstallerPod | None:
-    """Convert one API Pod into an installer Pod, when it is one.
+def _probes(
+    client: KubernetesClient,
+    namespace: str,
+    *,
+    owned: str,
+    pods: list[Any],
+) -> tuple[ObservedProbeWorkload, ...]:
+    """Read the scheduling probes of one StaticSet.
 
     Args:
-        pod: The Pod, as the official client models it.
+        client: The API client.
+        namespace: The namespace the StaticSet lives in.
+        owned: The selector matching everything the StaticSet owns.
+        pods: The Pods already listed for that selector.
 
     Returns:
-        The installer Pod, or ``None`` when the Pod is not a live installer.
+        The observed probe workloads, with their Pods attached.
+    """
+    label = selector(**{COMPONENT_LABEL: PROBE_COMPONENT})
+    by_owner: dict[str, list[ObservedProbePod]] = {}
+    for pod in pods:
+        metadata = pod.metadata
+        if ((metadata.labels if metadata else None) or {}).get(COMPONENT_LABEL) != PROBE_COMPONENT:
+            continue
+        owner = _owner_name(pod)
+        if owner is None:
+            continue
+        by_owner.setdefault(owner, []).append(
+            ObservedProbePod(
+                name=(metadata.name if metadata else None) or "",
+                node=pod.spec.node_name if pod.spec else None,
+                deleting=bool(metadata.deletion_timestamp) if metadata else False,
+            )
+        )
+    probes: list[ObservedProbeWorkload] = []
+    for kind, operation in (
+        ("ReplicaSet", client.apps.list_namespaced_replica_set),
+        ("DaemonSet", client.apps.list_namespaced_daemon_set),
+    ):
+        items = operation(namespace, label_selector=f"{owned},{label}").items or []
+        for item in items:
+            name = (item.metadata.name if item.metadata else None) or ""
+            probes.append(_probe(kind, item, by_owner.get(name, [])))
+    return tuple(probes)
+
+
+def _owner_name(pod: V1Pod) -> str | None:
+    """Return the name of the controller that owns a Pod.
+
+    Args:
+        pod: The Pod.
+
+    Returns:
+        The owning workload's name, or ``None`` when no owner is recorded yet.
     """
     metadata = pod.metadata
-    annotations = (metadata.annotations if metadata else None) or {}
-    if ((metadata.labels if metadata else None) or {}).get(COMPONENT_LABEL) != INSTALLER_COMPONENT:
+    if metadata is None or metadata.name is None:
         return None
-    if MIRROR_ANNOTATION in annotations:
-        return None
-    return InstallerPod(
+    for reference in metadata.owner_references or []:
+        if reference.controller:
+            return reference.name
+    return None
+
+
+def _probe(
+    kind: str,
+    item: Any,
+    pods: list[ObservedProbePod],
+) -> ObservedProbeWorkload:
+    """Convert one API workload into an observed probe.
+
+    Args:
+        kind: ``ReplicaSet`` or ``DaemonSet``.
+        item: The workload, as the official client models it.
+        pods: The Pods it owns.
+
+    Returns:
+        The observed probe.
+    """
+    metadata = item.metadata
+    labels = (metadata.labels if metadata else None) or {}
+    status = item.status
+    if kind == "DaemonSet":
+        replicas = int((status.desired_number_scheduled if status else 0) or 0)
+    else:
+        replicas = int((item.spec.replicas if item.spec else 0) or 0)
+    return ObservedProbeWorkload(
+        kind="DaemonSet" if kind == "DaemonSet" else "ReplicaSet",
         name=(metadata.name if metadata else None) or "",
-        uid=(metadata.uid if metadata else None) or "",
-        node=pod.spec.node_name if pod.spec else None,
-        phase=(pod.status.phase if pod.status else None) or "Pending",
-        deleting=bool(metadata.deletion_timestamp) if metadata else False,
+        generation=int(labels.get(GENERATION_LABEL, "0") or 0),
+        replicas=replicas,
+        status_seen=status is not None,
+        pods=tuple(pods),
     )
 
 
@@ -287,39 +352,100 @@ def _mirror_pod(pod: V1Pod) -> ObservedWorkload | None:
         The observed workload, or ``None`` when the Pod is not a mirror Pod.
     """
     metadata = pod.metadata
-    if MIRROR_ANNOTATION not in ((metadata.annotations if metadata else None) or {}):
+    annotations = (metadata.annotations if metadata else None) or {}
+    if MIRROR_ANNOTATION not in annotations:
         return None
     containers = (pod.status.container_statuses if pod.status else None) or []
     ready = all(container.ready for container in containers) if containers else None
     return ObservedWorkload(
         name=(metadata.name if metadata else None) or "",
         node=(pod.spec.node_name if pod.spec else None) or "",
+        placement=annotations.get(PLACEMENT_LABEL),
+        revision=annotations.get("staticsets.cloudlane.dev/revision"),
         phase=pod.status.phase if pod.status else None,
         ready=ready,
         restart_count=sum(container.restart_count or 0 for container in containers),
     )
 
 
-def _placement(config_map: V1ConfigMap) -> ObservedPlacement | None:
-    """Convert one placement ConfigMap into an observed placement.
+def _placements(
+    client: KubernetesClient,
+    namespace: str,
+    *,
+    owned: str,
+) -> tuple[ObservedPlacement, ...]:
+    """Read the placement records of one StaticSet.
 
     Args:
-        config_map: The ConfigMap, as the official client models it.
+        client: The API client.
+        namespace: The namespace the StaticSet lives in.
+        owned: The selector matching everything the StaticSet owns.
 
     Returns:
-        The observed placement, or ``None`` when the ConfigMap is not a placement.
+        The observed placements.
     """
-    data = config_map.data or {}
-    if not data.get("placement"):
-        return None
-    return ObservedPlacement(
-        identity=data["placement"],
-        node=data.get("node", ""),
-        revision=data.get("revision") or None,
-        state=data.get("state", "Installing"),
-        acknowledged=data.get("acknowledged") == "true",
-        message=data.get("message") or None,
+    config = StaticPodPlacement._require_resource_config()
+    items = cast(
+        "dict[str, Any]",
+        client.custom.list_namespaced_custom_object(
+            config.group,
+            config.version,
+            namespace,
+            config.plural,
+            label_selector=owned,
+        ),
     )
+    placements: list[ObservedPlacement] = []
+    for item in items.get("items", []):
+        placement = StaticPodPlacement.model_validate(_custom_body(config, item))
+        status = placement.status or PlacementState()
+        placements.append(
+            ObservedPlacement(
+                name=placement.metadata.name or "",
+                identity=_identity_of(placement.spec),
+                node=placement.spec.node,
+                desired=placement.spec.desired,
+                reason=placement.spec.reason,
+                generation=placement.spec.generation,
+                revision=status.revision,
+                phase=status.phase,
+                acknowledged=status.acknowledged,
+                static_pod_name=status.static_pod_name,
+                message=status.message,
+            )
+        )
+    return tuple(placements)
+
+
+def _custom_body(config: Any, item: dict[str, Any]) -> dict[str, Any]:
+    """Fill in the fields the API returns without, before validating an object.
+
+    Args:
+        config: The resource configuration.
+        item: The raw custom object.
+
+    Returns:
+        The body, with ``apiVersion`` and ``kind`` set.
+    """
+    return {
+        **item,
+        "apiVersion": item.get("apiVersion") or f"{config.group}/{config.version}",
+        "kind": item.get("kind") or config.kind,
+    }
+
+
+def _identity_of(spec: PlacementSpec) -> str:
+    """Return the placement identity implied by a spec.
+
+    Args:
+        spec: The placement's spec.
+
+    Returns:
+        The identity.
+    """
+    from static_sets.naming import placement_identity
+
+    return placement_identity(spec.static_set_uid, spec.node)
 
 
 def _apply(client: KubernetesClient, namespace: str, manifest: dict[str, Any]) -> None:
@@ -338,72 +464,85 @@ def _apply(client: KubernetesClient, namespace: str, manifest: dict[str, Any]) -
     upsert(client, namespace, model)
 
 
-def _delete_installers(client: KubernetesClient, *, namespace: str, name: str) -> None:
-    """Delete both installer workload kinds, so a mode switch leaves nothing behind.
+def _delete_probe(client: KubernetesClient, namespace: str, reference: ProbeRef) -> None:
+    """Delete one scheduling probe, tolerating its absence.
 
     Args:
         client: The API client.
-        namespace: The namespace the StaticSet lives in.
-        name: The StaticSet's name.
+        namespace: The namespace the probe lives in.
+        reference: The probe to delete.
     """
     options = V1DeleteOptions(propagation_policy="Background")
-    deployments = (
-        client.apps.list_namespaced_deployment(
-            namespace, label_selector=f"{SET_LABEL}={name}"
-        ).items
-        or []
+    operation = (
+        client.apps.delete_namespaced_daemon_set
+        if reference.kind == "DaemonSet"
+        else client.apps.delete_namespaced_replica_set
     )
-    for deployment in deployments:
-        if deployment.metadata and deployment.metadata.name:
-            client.apps.delete_namespaced_deployment(
-                deployment.metadata.name, namespace, body=options
-            )
-    daemon_sets = (
-        client.apps.list_namespaced_daemon_set(
-            namespace, label_selector=f"{SET_LABEL}={name}"
-        ).items
-        or []
-    )
-    for daemon_set in daemon_sets:
-        if daemon_set.metadata and daemon_set.metadata.name:
-            client.apps.delete_namespaced_daemon_set(
-                daemon_set.metadata.name, namespace, body=options
-            )
+    try:
+        operation(reference.name, namespace, body=options)
+    except ApiRequestError as error:
+        if error.status != 404:
+            raise
 
 
-def _publish_intent(client: KubernetesClient, namespace: str, action: CleanupAction) -> None:
-    """Publish a cleanup intent so the node can learn of it.
-
-    The controller has no host access, so the intent travels through the API: the
-    installer that still serves the node — or the cleanup worker pinned to it —
-    reads it, persists it locally, and only then acts.
+def _apply_placement(
+    client: KubernetesClient,
+    resource: StaticSet,
+    namespace: str,
+    change: PlacementChange,
+) -> None:
+    """Create, update or delete one placement record.
 
     Args:
         client: The API client.
-        namespace: The namespace the StaticSet lives in.
-        action: The cleanup action to publish.
+        resource: The owning StaticSet.
+        namespace: The namespace the placement lives in.
+        change: The write to perform.
     """
-    static_set = action.payload["staticSet"]
-    name = placement_configmap_name(static_set, action.identity)
-    upsert(
+    if change.kind == "delete":
+        delete_placement(client, namespace, change.name)
+        return
+    if change.spec is None:  # pragma: no cover - the planner never emits this
+        raise ValueError(f"an apply of {change.name} carries no spec")
+    apply_placement(
         client,
-        namespace,
-        V1ConfigMap(
-            api_version="v1",
-            kind="ConfigMap",
-            metadata=V1ObjectMeta(
-                name=name,
-                namespace=namespace,
-                labels={
-                    "app.kubernetes.io/managed-by": MANAGED_BY,
-                    COMPONENT_LABEL: PLACEMENT_COMPONENT,
-                    SET_LABEL: static_set,
-                    PLACEMENT_LABEL: action.identity,
-                },
+        StaticPodPlacement(
+            metadata=bk.ObjectMeta.model_validate(
+                {
+                    "name": change.name,
+                    "namespace": namespace,
+                    "labels": placement_labels(
+                        resource.metadata.name or "", resource.metadata.uid or ""
+                    ),
+                    "ownerReferences": _owner(resource),
+                }
             ),
-            data=dict(action.payload),
+            spec=change.spec,
         ),
     )
+
+
+def _owner(resource: StaticSet) -> list[dict[str, Any]]:
+    """Return the owner reference tying a placement to its StaticSet.
+
+    Args:
+        resource: The owning StaticSet.
+
+    Returns:
+        A single-entry list, or an empty list when the UID is unknown.
+    """
+    if not resource.metadata.uid:
+        return []
+    return [
+        {
+            "apiVersion": resource.apiVersion,
+            "kind": resource.kind,
+            "name": resource.metadata.name or "",
+            "uid": resource.metadata.uid,
+            "controller": True,
+            "blockOwnerDeletion": True,
+        }
+    ]
 
 
 @StaticSet.on.create
@@ -411,7 +550,7 @@ def _publish_intent(client: KubernetesClient, namespace: str, action: CleanupAct
 @StaticSet.on.update
 @StaticSet.on.timer(interval=TIMER_INTERVAL, initial_delay=30, idle=10)
 def reconcile(resource: StaticSet, patch: bk.Patch, logger: Any, **_: Any) -> None:
-    """Bring the installer placements of a StaticSet in line with its specification.
+    """Bring the placements of a StaticSet in line with its specification.
 
     Args:
         resource: The StaticSet being reconciled.
@@ -465,15 +604,18 @@ def finalize(resource: StaticSet, patch: bk.Patch, logger: Any, **_: Any) -> Non
     result = apply_plan(client, resource, state, namespace)
     publish_status(patch, result)
     pending = [record for record in result.status.cleanup if not record.acknowledged]
+    leftovers = [
+        placement for placement in state.placements if placement.phase is not PlacementPhase.CLEANED
+    ]
     logger.info(
         "finalizing %s/%s: %s placement(s) still pending",
         namespace,
         resource.metadata.name,
         len(pending),
     )
-    if pending:
+    if pending or leftovers:
         raise kopf.TemporaryError(
-            f"{len(pending)} placement(s) still await cleanup acknowledgment",
+            f"{max(len(pending), len(leftovers))} placement(s) still await cleanup acknowledgment",
             delay=30,
         )
     finalizers = list(resource.metadata.finalizers or [])

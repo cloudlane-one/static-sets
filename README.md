@@ -27,13 +27,19 @@ spec:
         - name: web
           image: registry.example.com/web:1.27
           imagePullPolicy: IfNotPresent
-  installer:
-    image: ghcr.io/cloudlane-one/static-sets:0.1.0
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
 ```
 
-The workload is never scheduled by Kubernetes. The operator creates *installer* Pods
-instead — a Deployment or a DaemonSet — and each installer writes the workload onto
-its own node.
+The workload itself is never scheduled by Kubernetes, but its *placement* is. The
+controller creates a temporary **scheduling probe** — a ReplicaSet or a DaemonSet whose
+Pods carry the workload's resources and the StaticSet's placement rules, and which run
+under a `RuntimeClass` no node can start — so the cluster's own scheduler decides where
+the workload goes. Every node a probe Pod landed on then gets the real static Pod from
+that node's **manager**, which runs once per node as a DaemonSet and serves every
+StaticSet placed on it, in every namespace.
 
 ## What it does
 
@@ -48,10 +54,11 @@ its own node.
   Secret-to-environment is refused unless you explicitly opt into the disclosure.
 - **Installs durably.** Immutable revision directories, explicit file modes, `fsync`,
   and atomic manifest replacement, so an interruption leaves either the old revision or
-  the new one and never a half-written file.
+  the new one and never a half-written file. The manifest's name carries the revision,
+  so a `Surge` rollout can keep the previous one running until its successor is up.
 - **Fences with an ownership protocol.** Placement identity is derived from the node,
-  so a replacement installer adopts its predecessor's placement; a stale installer
-  cannot delete a successor's workload.
+  so a replacement manager adopts its predecessor's placement; a stale manager cannot
+  delete a successor's workload.
 - **Separates installed state from observed health.** A placement can be installed and
   unhealthy, or installed and unobservable, and status says which.
 

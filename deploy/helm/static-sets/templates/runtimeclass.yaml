@@ -1,0 +1,15 @@
+{{- if .Values.probe.createRuntimeClass }}
+# The runtime class a scheduling probe asks for.
+#
+# No container runtime implements the handler, so every probe Pod is scheduled — the
+# scheduler does not care about runtime classes — and then fails to start when kubelet
+# asks the CRI for it. That is the point: the Pod exists to hold the scheduling
+# decision, never to run.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: {{ .Values.probe.runtimeClassName }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+handler: {{ .Values.probe.runtimeClassName }}
+{{- end }}

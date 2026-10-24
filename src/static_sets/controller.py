@@ -2,25 +2,28 @@
 
 The controller is split in two on purpose. Everything that decides *what should
 happen* lives here, as a pure function of the StaticSet and a snapshot of the
-cluster, so it can be tested exhaustively without a cluster. The thin kopf adapter
-in ``app/`` only reads the snapshot and applies the plan.
+cluster, so it can be tested exhaustively without a cluster. The thin kopf adapter in
+``app/`` only reads the snapshot and applies the plan.
 
-Two rules shape the whole module:
+Three rules shape the whole module:
 
-* an incomplete view is never an empty view. If watch synchronization has not
-  finished, or the operator could not read the placements, the plan performs **no**
-  destructive action and asks to be re-queued. Only a placement that is
-  authoritatively observed to have no installer is cleaned up;
-* cleanup is a protocol, not a side effect. A placement that is no longer wanted
-  gets a persisted intent and either a request to the installer that still serves it
-  or a restricted cleanup worker pinned to the recorded node. Nothing claims the
-  remote workload is gone until an acknowledgment says so.
+* **an incomplete view is never an empty view.** If watch synchronization has not
+  finished, the probe has not been fully created, or the operator could not read the
+  placements, the plan performs **no** destructive action and asks to be re-queued.
+  Placement is only *concluded* from a probe whose Pods all exist;
+* **placement is asked for, not assumed.** Where a static Pod goes is decided by the
+  Kubernetes scheduler, once per generation, through a probe workload. The plan never
+  guesses a node from a selector: it reports what the scheduler chose;
+* **cleanup is a protocol, not a side effect.** A placement that is no longer wanted
+  is marked ``desired: false`` and left in place until the node's manager reports that
+  the static Pod is gone. Nothing claims a host was cleaned up before the host says
+  so.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from static_sets.models import (
@@ -34,59 +37,58 @@ from static_sets.models import (
     PlacementStatus,
     StaticSet,
     StaticSetStatus,
+    UpdateStrategy,
     WorkloadHealth,
 )
-from static_sets.naming import (
-    ANNOTATION_GENERATION,
-    ANNOTATION_PLACEMENT,
-    CLEANUP_FINALIZER,
-    MANAGED_BY,
-    PLACEMENT_LABEL,
-    cleanup_worker_name,
-    installer_labels,
-    placement_identity,
-    static_pod_name,
-)
-from static_sets.placement import (
-    CLEANUP_COMMAND,
-    BUNDLE_MOUNT,
-    INSTALLER_CONTAINER,
-    STATIC_POD_MOUNT,
-    installer_service_account,
-    InstallerPod,
+from static_sets.naming import placement_identity, placement_name
+from static_sets.placements import PlacementSpec
+from static_sets.probe import (
     NodeInfo,
-    ObservedPlacement,
+    ObservedProbeWorkload,
+    ObservedWorkload,
     eligible_nodes,
-    installer_workload,
+    probe_workload,
 )
 
 __all__ = [
-    "CleanupAction",
+    "ObservedPlacement",
     "ObservedState",
-    "ObservedWorkload",
+    "PlacementChange",
+    "ProbeRef",
     "ReconcilePlan",
-    "cleanup_worker_pod",
     "plan",
 ]
 
 
 @dataclass(frozen=True)
-class ObservedWorkload:
-    """A mirror Pod kubelet created for a static Pod.
+class ObservedPlacement:
+    """One placement record, as the node's manager last reported it.
 
     Attributes:
-        name: The mirror Pod's name, which equals the static Pod's name.
-        node: The node it runs on.
-        phase: The mirror Pod's phase, when known.
-        ready: Whether the mirror Pod reports ``Ready``, when known.
-        restart_count: The containers' aggregate restart count, when known.
+        name: The placement object's name.
+        identity: The placement identity.
+        node: The node the scheduler chose.
+        desired: Whether the placement is still wanted.
+        reason: Why it is no longer wanted, when it is not.
+        generation: The generation the controller last placed it for.
+        revision: The revision the manager reports as installed.
+        phase: Where the placement stands.
+        acknowledged: Whether the manager confirmed its last report is durable.
+        static_pod_name: The static Pod backing the placement, as reported.
+        message: The manager's explanation, if any.
     """
 
     name: str
+    identity: str
     node: str
-    phase: str | None = None
-    ready: bool | None = None
-    restart_count: int | None = None
+    desired: bool = True
+    reason: CleanupReason | None = None
+    generation: int = 0
+    revision: str | None = None
+    phase: PlacementPhase = PlacementPhase.PENDING
+    acknowledged: bool = False
+    static_pod_name: str | None = None
+    message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,8 +97,8 @@ class ObservedState:
 
     Attributes:
         nodes: The nodes of the cluster.
-        installer_pods: The installer Pods currently observed.
-        placements: The placements acknowledged by installers.
+        probes: The scheduling probes currently observed for this StaticSet.
+        placements: The placement records currently observed.
         workloads: The mirror Pods kubelet created for the static workloads.
         synced: Whether watch synchronization has completed. When ``False`` the
             plan is non-destructive.
@@ -104,7 +106,7 @@ class ObservedState:
     """
 
     nodes: tuple[NodeInfo, ...] = ()
-    installer_pods: tuple[InstallerPod, ...] = ()
+    probes: tuple[ObservedProbeWorkload, ...] = ()
     placements: tuple[ObservedPlacement, ...] = ()
     workloads: tuple[ObservedWorkload, ...] = ()
     synced: bool = True
@@ -112,24 +114,33 @@ class ObservedState:
 
 
 @dataclass(frozen=True)
-class CleanupAction:
-    """One persisted cleanup intent, with the worker that may carry it out.
+class ProbeRef:
+    """A scheduling probe to delete.
 
     Attributes:
-        record: The cleanup record to publish in status.
-        node: The node the workload lives on.
-        identity: The placement identity.
-        pod_name: The static Pod's name.
-        worker: The cleanup worker Pod manifest, when one is needed.
-        payload: The intent as data, for the ConfigMap that carries it to the node.
+        kind: ``ReplicaSet`` or ``DaemonSet``.
+        name: The workload's name.
     """
 
-    record: CleanupRecord
-    node: str
-    identity: str
-    pod_name: str
-    worker: dict[str, Any] | None
-    payload: Mapping[str, str]
+    kind: Literal["ReplicaSet", "DaemonSet"]
+    name: str
+
+
+@dataclass(frozen=True)
+class PlacementChange:
+    """One write the adapter has to perform on a placement record.
+
+    Attributes:
+        kind: ``apply`` to create or update the spec, ``delete`` to remove the object.
+        name: The placement object's name.
+        namespace: The namespace it lives in.
+        spec: The desired spec, for ``apply``.
+    """
+
+    kind: Literal["apply", "delete"]
+    name: str
+    namespace: str
+    spec: PlacementSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -137,19 +148,18 @@ class ReconcilePlan:
     """What the adapter should do, and what it should report.
 
     Attributes:
-        workload: The installer workload to apply, as ``(kind, manifest)``, or
-            ``None`` when nothing should be created.
-        delete_workload: Whether the installer workload should be deleted instead.
-        cleanup: The cleanup actions to persist and act on.
+        probe: The scheduling probe to apply, as ``(kind, manifest)``, or ``None``.
+        delete_probes: The probe workloads to delete.
+        placements: The placement records to write.
         status: The status to publish.
         requeue: Whether to reconcile again shortly.
     """
 
-    workload: tuple[Literal["Deployment", "DaemonSet"], dict[str, Any]] | None
-    delete_workload: bool
-    cleanup: tuple[CleanupAction, ...]
-    status: StaticSetStatus
-    requeue: bool
+    probe: tuple[Literal["ReplicaSet", "DaemonSet"], dict[str, Any]] | None = None
+    delete_probes: tuple[ProbeRef, ...] = ()
+    placements: tuple[PlacementChange, ...] = ()
+    status: StaticSetStatus = field(default_factory=StaticSetStatus)
+    requeue: bool = False
 
 
 def plan(
@@ -171,9 +181,6 @@ def plan(
     generation = static_set.metadata.generation or 0
     if not observed.synced:
         return ReconcilePlan(
-            workload=None,
-            delete_workload=False,
-            cleanup=(),
             status=_status_without_action(
                 static_set,
                 observed,
@@ -187,36 +194,362 @@ def plan(
         )
     if static_set.metadata.deletion_timestamp is not None:
         return _deletion_plan(static_set, observed, namespace=namespace)
-    kind, manifest = installer_workload(static_set, namespace=namespace, generation=generation)
-    live = _live_installers(observed.installer_pods)
-    cleanup = _cleanup_actions(static_set, observed, live=live, namespace=namespace)
+    probe = probe_workload(static_set, namespace=namespace, generation=generation)
+    target, stale = _split_probes(observed.probes, kind=probe[0], generation=generation)
+    if target is not None:
+        return _pass_plan(
+            static_set,
+            observed,
+            target=target,
+            stale=stale,
+            namespace=namespace,
+        )
+    return _start_pass_plan(static_set, observed, stale=stale, manifest=probe, namespace=namespace)
+
+
+def _split_probes(
+    probes: Iterable[ObservedProbeWorkload],
+    *,
+    kind: Literal["ReplicaSet", "DaemonSet"],
+    generation: int,
+) -> tuple[ObservedProbeWorkload | None, tuple[ObservedProbeWorkload, ...]]:
+    """Split the observed probes into the current one and the stale ones.
+
+    Args:
+        probes: The probes observed.
+        kind: The kind the current mode calls for.
+        generation: The current generation.
+
+    Returns:
+        The probe for the current kind and generation (newest name winning), and the
+        probes that belong to another generation or another kind.
+    """
+    current = [probe for probe in probes if probe.kind == kind and probe.generation == generation]
+    stale = tuple(
+        probe for probe in probes if not (probe.kind == kind and probe.generation == generation)
+    )
+    newest = sorted(current, key=lambda probe: probe.name)[-1] if current else None
+    return newest, stale
+
+
+def _start_pass_plan(
+    static_set: StaticSet,
+    observed: ObservedState,
+    *,
+    stale: tuple[ObservedProbeWorkload, ...],
+    manifest: tuple[Literal["ReplicaSet", "DaemonSet"], dict[str, Any]],
+    namespace: str,
+) -> ReconcilePlan:
+    """Plan the beginning of a scheduling pass, or nothing at all.
+
+    A pass is started when the current generation has not been placed yet, when the
+    placements that came out of the last pass no longer cover what the specification
+    asks for, or when a probe from an older generation is still around.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+        stale: The probes that belong to an older generation or another mode.
+        manifest: The probe workload to create when a pass is needed.
+        namespace: The namespace the StaticSet lives in.
+
+    Returns:
+        The plan to apply.
+    """
+    del namespace
+    generation = static_set.metadata.generation or 0
+    placed = static_set.status.placed_generation if static_set.status else 0
+    if placed >= generation and not _shortfall(static_set, observed) and not stale:
+        return ReconcilePlan(status=_running_status(static_set, observed))
+    if stale and static_set.spec.update.strategy is UpdateStrategy.RECREATE:
+        # The old probe holds the reservation the new placement needs. Deleting it is
+        # the only way the scheduler can see that capacity again, and its Pods take a
+        # moment to disappear, so the new probe is created on the next reconcile.
+        return ReconcilePlan(
+            delete_probes=_probe_refs(stale),
+            status=_status_with_condition(
+                static_set,
+                observed,
+                "Scheduling",
+                "True",
+                "RetiringPreviousPlacement",
+                "the previous scheduling probe is being deleted before a new pass starts",
+            ),
+            requeue=True,
+        )
     return ReconcilePlan(
-        workload=(kind, manifest),
-        delete_workload=False,
-        cleanup=cleanup,
-        status=_running_status(static_set, observed, live=live, cleanup=cleanup),
-        requeue=any(not action.record.acknowledged for action in cleanup),
+        probe=manifest,
+        delete_probes=_probe_refs(stale),
+        status=_status_with_condition(
+            static_set,
+            observed,
+            "Scheduling",
+            "True",
+            "ProbeCreated",
+            (
+                "the scheduler is being asked where the workload should run; its Pods are "
+                "bound but never started"
+            ),
+        ),
+        requeue=True,
     )
 
 
-def _live_installers(installer_pods: tuple[InstallerPod, ...]) -> dict[str, InstallerPod]:
-    """Index the installer Pods that currently serve a node.
-
-    A Pod that is terminating no longer serves its node, so its placement becomes a
-    cleanup candidate rather than a live one.
+def _pass_plan(
+    static_set: StaticSet,
+    observed: ObservedState,
+    *,
+    target: ObservedProbeWorkload,
+    stale: tuple[ObservedProbeWorkload, ...],
+    namespace: str,
+) -> ReconcilePlan:
+    """Plan a scheduling pass that is in flight or complete.
 
     Args:
-        installer_pods: The observed installer Pods.
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+        target: The probe for the current generation.
+        stale: The probes that belong to an older generation or another mode.
+        namespace: The namespace the StaticSet lives in.
 
     Returns:
-        The node name to installer Pod mapping, newest name winning.
+        The plan to apply.
     """
-    live: dict[str, InstallerPod] = {}
-    for pod in installer_pods:
-        if pod.node is None or pod.deleting:
+    if not target.complete:
+        return ReconcilePlan(
+            delete_probes=_probe_refs(stale),
+            status=_status_with_condition(
+                static_set,
+                observed,
+                "Scheduling",
+                "True",
+                "Unschedulable" if target.unscheduled else "ProbePending",
+                (
+                    f"the scheduling probe has {len(target.pods)} of {target.replicas} Pod(s); "
+                    "placement is concluded only once every Pod exists"
+                ),
+            ),
+            requeue=True,
+        )
+    desired_nodes = {pod.node for pod in target.scheduled if pod.node}
+    if not desired_nodes and target.replicas:
+        # Every probe Pod is unbound: the workload does not fit anywhere, which is a
+        # real answer about the cluster rather than a reason to remove anything.
+        return ReconcilePlan(
+            delete_probes=_probe_refs(stale),
+            status=_status_with_condition(
+                static_set,
+                observed,
+                "Scheduling",
+                "True",
+                "Pending",
+                "no node admitted the scheduling probe; nothing is installed yet",
+            ),
+            requeue=True,
+        )
+    changes = _placement_changes(static_set, observed, desired_nodes, namespace=namespace)
+    if not _placements_complete(observed, desired_nodes):
+        return ReconcilePlan(
+            delete_probes=_probe_refs(stale),
+            placements=changes,
+            status=_status_with_condition(
+                static_set,
+                observed,
+                "Scheduling",
+                "True",
+                "Installing",
+                "the scheduler has placed the workload; its nodes are installing it",
+            ),
+            requeue=True,
+        )
+    # The scheduler's job is done: every static Pod is installed and mirrored, so the
+    # reservation the probe holds is released and the decision lives on in the
+    # placement records.
+    status = _running_status(static_set, observed)
+    status.placed_generation = static_set.metadata.generation or 0
+    status.conditions.append(
+        _condition(
+            "Scheduling",
+            "False",
+            "Placed",
+            f"the scheduler placed {len(desired_nodes)} placement(s) for this generation",
+            static_set,
+            observed,
+        )
+    )
+    return ReconcilePlan(
+        delete_probes=(ProbeRef(target.kind, target.name), *_probe_refs(stale)),
+        placements=changes,
+        status=status,
+    )
+
+
+def _probe_refs(probes: Iterable[ObservedProbeWorkload]) -> tuple[ProbeRef, ...]:
+    """Return the references that delete a set of probes.
+
+    Args:
+        probes: The probes to delete.
+
+    Returns:
+        The references.
+    """
+    return tuple(ProbeRef(probe.kind, probe.name) for probe in probes)
+
+
+def _shortfall(static_set: StaticSet, observed: ObservedState) -> bool:
+    """Return whether the placements no longer cover the specification.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+
+    Returns:
+        ``True`` when fewer placements are installed than the specification asks for.
+    """
+    installed = [
+        placement
+        for placement in observed.placements
+        if placement.desired and placement.phase is PlacementPhase.INSTALLED
+    ]
+    return len(installed) < _desired_count(static_set, observed)
+
+
+def _desired_count(static_set: StaticSet, observed: ObservedState) -> int:
+    """Return how many placements the specification asks for.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+
+    Returns:
+        The desired number of placements.
+    """
+    if static_set.spec.mode is Mode.DAEMON_SET:
+        return len(eligible_nodes(observed.nodes, static_set.spec))
+    return static_set.spec.replicas or 0
+
+
+def _placement_changes(
+    static_set: StaticSet,
+    observed: ObservedState,
+    desired_nodes: set[str],
+    *,
+    namespace: str,
+) -> tuple[PlacementChange, ...]:
+    """Return the placement writes a completed pass calls for.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+        desired_nodes: The nodes the scheduler chose.
+        namespace: The namespace the StaticSet lives in.
+
+    Returns:
+        The writes, sorted by node.
+    """
+    generation = static_set.metadata.generation or 0
+    uid = static_set.metadata.uid or ""
+    name = static_set.metadata.name or ""
+    remove_configuration = static_set.spec.cleanup.remove_configuration_after_ack
+    existing = {placement.node: placement for placement in observed.placements if placement.desired}
+    changes: list[PlacementChange] = []
+    for node in sorted(desired_nodes):
+        current = existing.get(node)
+        if current is not None and current.generation == generation:
             continue
-        live[pod.node] = pod
-    return live
+        changes.append(
+            PlacementChange(
+                kind="apply",
+                name=placement_name(name, placement_identity(uid, node)),
+                namespace=namespace,
+                spec=PlacementSpec(
+                    static_set=name,
+                    static_set_uid=uid,
+                    node=node,
+                    generation=generation,
+                    desired=True,
+                    remove_configuration=remove_configuration,
+                ),
+            )
+        )
+    reason = _cleanup_reason(static_set, observed, desired_nodes)
+    for placement in observed.placements:
+        if placement.node in desired_nodes:
+            continue
+        if not placement.desired:
+            if placement.phase is PlacementPhase.CLEANED:
+                # The removal finished: the record has served its purpose and is closed.
+                changes.append(
+                    PlacementChange(kind="delete", name=placement.name, namespace=namespace)
+                )
+            continue
+        changes.append(
+            PlacementChange(
+                kind="apply",
+                name=placement.name,
+                namespace=namespace,
+                spec=PlacementSpec(
+                    static_set=name,
+                    static_set_uid=uid,
+                    node=placement.node,
+                    generation=generation,
+                    desired=False,
+                    reason=reason,
+                    remove_configuration=remove_configuration,
+                ),
+            )
+        )
+    return tuple(changes)
+
+
+def _cleanup_reason(
+    static_set: StaticSet,
+    observed: ObservedState,
+    desired_nodes: set[str],
+) -> CleanupReason:
+    """Decide why a placement is being removed.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+        desired_nodes: The nodes the scheduler chose in this pass.
+
+    Returns:
+        The cleanup reason recorded in the placement.
+    """
+    if static_set.spec.mode is Mode.DEPLOYMENT:
+        previous = sum(1 for placement in observed.placements if placement.desired)
+        if len(desired_nodes) < previous:
+            return CleanupReason.SCALED_DOWN
+        return CleanupReason.RELOCATED
+    return CleanupReason.DESELECTED
+
+
+def _placements_complete(observed: ObservedState, desired_nodes: set[str]) -> bool:
+    """Return whether every chosen node has installed and mirrored its static Pod.
+
+    A probe reservation is only released once kubelet has published a mirror Pod for
+    the workload on that node: that is the observable proof that the manifest exists
+    and was accepted, which is what the reservation was standing in for.
+
+    Args:
+        observed: The snapshot of the cluster.
+        desired_nodes: The nodes the scheduler chose.
+
+    Returns:
+        ``True`` when every placement for those nodes is installed and mirrored.
+    """
+    by_node = {placement.node: placement for placement in observed.placements}
+    mirrored = {workload.placement for workload in observed.workloads if workload.placement}
+    for node in desired_nodes:
+        placement = by_node.get(node)
+        if placement is None or not placement.acknowledged:
+            return False
+        if placement.phase is not PlacementPhase.INSTALLED:
+            return False
+        if placement.identity not in mirrored:
+            return False
+    return True
 
 
 def _deletion_plan(
@@ -227,10 +560,9 @@ def _deletion_plan(
 ) -> ReconcilePlan:
     """Compute the plan for a StaticSet that is being deleted.
 
-    Deletion is the one case where every observed placement is cleaned up, because
-    the user's intent is unambiguous: the object is going away and its static Pods
-    should go with it. The installer workload is deleted first, but nothing is
-    released until each placement acknowledges removal.
+    Deletion is the one case where every observed placement is removed, because the
+    user's intent is unambiguous. Nothing is released until each placement's manager
+    acknowledges that its static Pod is gone; the record is deleted only after that.
 
     Args:
         static_set: The StaticSet being deleted.
@@ -240,329 +572,166 @@ def _deletion_plan(
     Returns:
         The plan to apply.
     """
-    live = _live_installers(observed.installer_pods)
-    ready = _ready_nodes(observed)
-    cleanup = tuple(
-        _cleanup_action(
-            static_set,
-            placement,
-            reason=CleanupReason.RESOURCE_DELETED,
-            installer=live.get(placement.node),
-            node_ready=placement.node in ready,
-            namespace=namespace,
-            observed_at=observed.observed_at,
-        )
-        for placement in observed.placements
-    )
-    acknowledged = all(action.record.acknowledged for action in cleanup)
-    status = StaticSetStatus(
-        observed_generation=static_set.metadata.generation or 0,
-        desired_revision=None,
-        placements=[
-            PlacementStatus(
-                identity=action.identity,
-                node=action.node,
-                revision=action.record.revision,
-                phase=PlacementPhase.CLEANING,
-                acknowledged=action.record.acknowledged,
-                generation=action.record.generation,
-                message=action.record.message,
-            )
-            for action in cleanup
-        ],
-        cleanup=[action.record for action in cleanup],
-        conditions=[
-            _condition(
-                "Deleting",
-                "True",
-                "ResourceDeleted",
-                "the StaticSet is being deleted; placements are being cleaned up",
-                static_set,
-                observed,
-            ),
-            _condition(
-                "Ready",
-                "False",
-                "Deleting",
-                "the StaticSet is being deleted",
-                static_set,
-                observed,
-            ),
-            _condition(
-                "CleanedUp",
-                "True" if acknowledged else "False",
-                "CleanupAcknowledged" if acknowledged else "CleanupPending",
-                (
-                    "every placement acknowledged cleanup"
-                    if acknowledged
-                    else "waiting for placements to acknowledge cleanup"
+    generation = static_set.metadata.generation or 0
+    uid = static_set.metadata.uid or ""
+    name = static_set.metadata.name or ""
+    changes: list[PlacementChange] = []
+    for placement in observed.placements:
+        if placement.phase is PlacementPhase.CLEANED:
+            changes.append(PlacementChange(kind="delete", name=placement.name, namespace=namespace))
+            continue
+        changes.append(
+            PlacementChange(
+                kind="apply",
+                name=placement.name,
+                namespace=namespace,
+                spec=PlacementSpec(
+                    static_set=name,
+                    static_set_uid=uid,
+                    node=placement.node,
+                    generation=generation,
+                    desired=False,
+                    reason=CleanupReason.RESOURCE_DELETED,
+                    remove_configuration=static_set.spec.cleanup.remove_configuration_after_ack,
                 ),
-                static_set,
-                observed,
-            ),
-        ],
+            )
+        )
+    acknowledged = all(
+        placement.phase is PlacementPhase.CLEANED for placement in observed.placements
     )
+    status = _running_status(static_set, observed)
+    status.desired_revision = None
+    status.conditions = [
+        _condition(
+            "Deleting",
+            "True",
+            "ResourceDeleted",
+            "the StaticSet is being deleted; placements are being cleaned up",
+            static_set,
+            observed,
+        ),
+        _condition(
+            "Ready",
+            "False",
+            "Deleting",
+            "the StaticSet is being deleted",
+            static_set,
+            observed,
+        ),
+        _condition(
+            "CleanedUp",
+            "True" if acknowledged else "False",
+            "CleanupAcknowledged" if acknowledged else "CleanupPending",
+            (
+                "every placement acknowledged cleanup"
+                if acknowledged
+                else "waiting for placements to acknowledge cleanup"
+            ),
+            static_set,
+            observed,
+        ),
+    ]
     return ReconcilePlan(
-        workload=None,
-        delete_workload=True,
-        cleanup=cleanup,
+        delete_probes=_probe_refs(observed.probes),
+        placements=tuple(changes),
         status=status,
         requeue=not acknowledged,
     )
 
 
-def _cleanup_actions(
+def _status_without_action(
     static_set: StaticSet,
     observed: ObservedState,
     *,
-    live: dict[str, InstallerPod],
-    namespace: str,
-) -> tuple[CleanupAction, ...]:
-    """Return the cleanup actions for placements no installer serves any more.
-
-    Args:
-        static_set: The StaticSet being reconciled.
-        observed: The snapshot of the cluster.
-        live: The installer Pods that currently serve a node.
-        namespace: The namespace the StaticSet lives in.
-
-    Returns:
-        The cleanup actions, sorted by placement identity.
-    """
-    actions: list[CleanupAction] = []
-    ready = _ready_nodes(observed)
-    for placement in observed.placements:
-        if placement.node in live and placement.state != "Removed":
-            continue
-        if placement.state == "Removed":
-            continue
-        actions.append(
-            _cleanup_action(
-                static_set,
-                placement,
-                reason=_cleanup_reason(static_set, observed, live=live),
-                installer=live.get(placement.node),
-                node_ready=placement.node in ready,
-                namespace=namespace,
-                observed_at=observed.observed_at,
-            )
-        )
-    return tuple(sorted(actions, key=lambda action: action.identity))
-
-
-def _ready_nodes(observed: ObservedState) -> set[str]:
-    """Return the nodes that report ``Ready``.
-
-    A node whose kubelet is not reporting Ready is not reachable for cleanup
-    purposes either, so its placements are reported as pending rather than chased.
-
-    Args:
-        observed: The snapshot of the cluster.
-
-    Returns:
-        The names of the nodes that report Ready.
-    """
-    return {node.name for node in observed.nodes if node.ready}
-
-
-def _cleanup_reason(
-    static_set: StaticSet,
-    observed: ObservedState,
-    *,
-    live: dict[str, InstallerPod],
-) -> CleanupReason:
-    """Decide why a placement is being cleaned up.
-
-    Args:
-        static_set: The StaticSet being reconciled.
-        observed: The snapshot of the cluster.
-        live: The installer Pods that currently serve a node.
-
-    Returns:
-        The cleanup reason recorded in the intent.
-    """
-    spec = static_set.spec
-    if spec.mode is Mode.DEPLOYMENT and spec.replicas is not None and len(live) < spec.replicas:
-        return CleanupReason.SCALED_DOWN
-    if spec.mode is Mode.DAEMON_SET:
-        eligible = set(eligible_nodes(observed.nodes, spec))
-        if any(
-            placement.node not in eligible
-            for placement in observed.placements
-            if placement.node not in live
-        ):
-            return CleanupReason.DESELECTED
-    return CleanupReason.RELOCATED
-
-
-def _cleanup_action(
-    static_set: StaticSet,
-    placement: ObservedPlacement,
-    *,
-    reason: CleanupReason,
-    installer: InstallerPod | None,
-    node_ready: bool,
-    namespace: str,
-    observed_at: str,
-) -> CleanupAction:
-    """Build one cleanup action, including a worker when the installer is gone.
-
-    Args:
-        static_set: The StaticSet being reconciled.
-        placement: The placement being cleaned up.
-        reason: Why it is being cleaned up.
-        installer: The installer Pod still serving the placement, if any.
-        node_ready: Whether the node holding the placement reports Ready.
-        namespace: The namespace the StaticSet lives in.
-        observed_at: The current time, RFC 3339, stamped onto the intent.
-
-    Returns:
-        The cleanup action.
-    """
-    generation = static_set.metadata.generation or 0
-    pod_name = static_pod_name(static_set.metadata.name or "", placement.identity)
-    if installer is not None:
-        state = CleanupState.REQUESTED
-    elif node_ready:
-        state = CleanupState.QUEUED
-    else:
-        state = CleanupState.BLOCKED
-    record = CleanupRecord(
-        identity=placement.identity,
-        node=placement.node,
-        revision=placement.revision,
-        generation=generation,
-        reason=reason,
-        state=state,
-        acknowledged=placement.state == "Removed",
-        message=_cleanup_message(static_set, placement, installer, node_ready),
-    )
-    worker = None
-    if installer is None and node_ready:
-        worker = cleanup_worker_pod(
-            static_set,
-            namespace=namespace,
-            identity=placement.identity,
-            node=placement.node,
-            generation=generation,
-            reason=reason.value,
-            pod_name=pod_name,
-        )
-    return CleanupAction(
-        record=record,
-        node=placement.node,
-        identity=placement.identity,
-        pod_name=pod_name,
-        worker=worker,
-        payload={
-            "cleanup": "true",
-            "placement": placement.identity,
-            "podName": pod_name,
-            "staticSet": static_set.metadata.name or "",
-            "uid": static_set.metadata.uid or "",
-            "namespace": namespace,
-            "node": placement.node,
-            "generation": str(generation),
-            "reason": reason.value,
-            "removeConfiguration": (
-                "true" if static_set.spec.cleanup.remove_configuration_after_ack else "false"
-            ),
-            "requestedAt": observed_at,
-        },
-    )
-
-
-def _cleanup_message(
-    static_set: StaticSet,
-    placement: ObservedPlacement,
-    installer: InstallerPod | None,
-    node_ready: bool,
-) -> str:
-    """Explain the cleanup state for status.
-
-    Args:
-        static_set: The StaticSet being reconciled.
-        placement: The placement being cleaned up.
-        installer: The installer Pod still serving it, if any.
-        node_ready: Whether the node holding the placement reports Ready.
-
-    Returns:
-        The explanation.
-    """
-    if installer is not None:
-        return "cleanup requested from the installer that serves this placement"
-    policy = static_set.spec.cleanup.on_node_unreachable
-    if not node_ready:
-        grace = static_set.spec.cleanup.abandonment_grace_seconds
-        followed = (
-            f", after which an administrator may abandon it following a {grace}s grace period"
-            if policy is NodeUnreachablePolicy.ABANDON_AFTER_GRACE
-            else ""
-        )
-        return (
-            f"node {placement.node} is not Ready, so the static workload there cannot be "
-            "reached; cleanup stays pending and a residual workload may still be running "
-            f"there. The declared policy is {policy.value}" + followed
-        )
-    return (
-        f"no installer serves node {placement.node}; a restricted cleanup worker is queued. "
-        "The workload is reported as pending until the worker acknowledges removal"
-    )
-
-
-def _running_status(
-    static_set: StaticSet,
-    observed: ObservedState,
-    *,
-    live: dict[str, InstallerPod],
-    cleanup: tuple[CleanupAction, ...],
+    reason: str,
+    message: str,
 ) -> StaticSetStatus:
+    """Build the status of a reconcile that deliberately did nothing.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+        reason: The condition reason.
+        message: The condition message.
+
+    Returns:
+        The status to publish.
+    """
+    return StaticSetStatus(
+        observed_generation=static_set.metadata.generation or 0,
+        placed_generation=static_set.status.placed_generation if static_set.status else 0,
+        placements=_placement_rows(observed),
+        health=_health(observed),
+        cleanup=_cleanup_records(static_set, observed),
+        conditions=[
+            _condition("Synchronized", "False", reason, message, static_set, observed),
+            _condition(
+                "Ready",
+                "Unknown",
+                reason,
+                "readiness cannot be determined before synchronization completes",
+                static_set,
+                observed,
+            ),
+        ],
+    )
+
+
+def _status_with_condition(
+    static_set: StaticSet,
+    observed: ObservedState,
+    condition_type: str,
+    status: Literal["True", "False", "Unknown"],
+    reason: str,
+    message: str,
+) -> StaticSetStatus:
+    """Build the status of a pass that has not concluded yet.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+        condition_type: The condition to set.
+        status: Its status.
+        reason: Its reason.
+        message: Its message.
+
+    Returns:
+        The status to publish.
+    """
+    result = _running_status(static_set, observed)
+    result.conditions.append(
+        _condition(condition_type, status, reason, message, static_set, observed)
+    )
+    return result
+
+
+def _running_status(static_set: StaticSet, observed: ObservedState) -> StaticSetStatus:
     """Build the status of a StaticSet that is not being deleted.
 
     Args:
         static_set: The StaticSet being reconciled.
         observed: The snapshot of the cluster.
-        live: The installer Pods that currently serve a node.
-        cleanup: The cleanup actions computed for this reconcile.
 
     Returns:
         The status to publish.
     """
-    name = static_set.metadata.name or ""
-    acknowledged = {placement.identity: placement for placement in observed.placements}
-    placements: list[PlacementStatus] = []
-    for node in sorted(live):
-        identity = placement_identity(static_set.metadata.uid or "", node)
-        placement = acknowledged.get(identity)
-        if placement is None:
-            placements.append(
-                PlacementStatus(identity=identity, node=node, phase=PlacementPhase.PENDING)
-            )
-            continue
-        placements.append(
-            PlacementStatus(
-                identity=identity,
-                node=node,
-                revision=placement.revision,
-                phase=(
-                    PlacementPhase.INSTALLED if placement.acknowledged else PlacementPhase.PENDING
-                ),
-                acknowledged=placement.acknowledged,
-                generation=static_set.metadata.generation or 0,
-                message=placement.message,
-            )
-        )
-    installed = [item for item in placements if item.phase is PlacementPhase.INSTALLED]
-    revisions = sorted({item.revision for item in installed if item.revision})
-    health = _health(static_set, placements, observed)
-    pending_cleanup = [action for action in cleanup if not action.record.acknowledged]
-    ready = _is_ready(static_set, observed, placements=placements, installed=installed)
+    rows = _placement_rows(observed)
+    installed = [row for row in rows if row.phase is PlacementPhase.INSTALLED]
+    revisions = {row.revision for row in installed if row.revision}
+    cleanup = _cleanup_records(static_set, observed)
+    pending_cleanup = [record for record in cleanup if not record.acknowledged]
+    ready = _is_ready(static_set, observed, rows=rows, installed=installed)
     status = StaticSetStatus(
         observed_generation=static_set.metadata.generation or 0,
-        desired_revision=revisions[-1] if revisions else None,
-        placements=placements,
-        health=health,
-        cleanup=[action.record for action in cleanup],
+        placed_generation=static_set.status.placed_generation if static_set.status else 0,
+        # Revisions are content hashes with no ordering, so a single "desired" revision
+        # is only reportable while every placement agrees on it. During a rollout there
+        # is no honest single answer, and reporting the newest-looking one would be a
+        # guess.
+        desired_revision=next(iter(revisions)) if len(revisions) == 1 else None,
+        placements=rows,
+        health=_health(observed),
+        cleanup=cleanup,
         conditions=[
             _condition(
                 "Synchronized",
@@ -577,10 +746,10 @@ def _running_status(
                 "True" if ready else "False",
                 "AllPlacementsInstalled" if ready else "PlacementsPending",
                 (
-                    "every desired placement is installed and acknowledged"
+                    "every desired placement is installed, acknowledged and mirrored"
                     if ready
-                    else f"{len(installed)} of {_desired_count(static_set, observed)} placement(s) "
-                    "acknowledged installation"
+                    else f"{len(installed)} of {_desired_count(static_set, observed)} "
+                    "placement(s) are installed"
                 ),
                 static_set,
                 observed,
@@ -599,18 +768,7 @@ def _running_status(
             ),
         ],
     )
-    if name:
-        status.conditions.append(
-            _condition(
-                "InstallersRunning",
-                "True" if live else "False",
-                "InstallersLive" if live else "NoInstallers",
-                f"{len(live)} installer(s) currently serve {name}",
-                static_set,
-                observed,
-            )
-        )
-    if any(item.phase is PlacementPhase.FAILED for item in placements):
+    if any(row.phase is PlacementPhase.FAILED for row in rows):
         status.conditions.append(
             _condition(
                 "Degraded",
@@ -624,29 +782,128 @@ def _running_status(
     return status
 
 
-def _health(
+def _placement_rows(observed: ObservedState) -> list[PlacementStatus]:
+    """Build the status rows for the observed placements.
+
+    Args:
+        observed: The snapshot of the cluster.
+
+    Returns:
+        One row per placement, sorted by node.
+    """
+    return [
+        PlacementStatus(
+            identity=placement.identity,
+            node=placement.node,
+            revision=placement.revision,
+            phase=placement.phase,
+            acknowledged=placement.acknowledged,
+            generation=placement.generation,
+            message=placement.message,
+        )
+        for placement in sorted(observed.placements, key=lambda item: item.node)
+    ]
+
+
+def _cleanup_records(
     static_set: StaticSet,
-    placements: list[PlacementStatus],
     observed: ObservedState,
-) -> list[WorkloadHealth]:
+) -> list[CleanupRecord]:
+    """Build the cleanup records for placements that are no longer wanted.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        observed: The snapshot of the cluster.
+
+    Returns:
+        One record per removal, sorted by node.
+    """
+    ready = {node.name for node in observed.nodes if node.ready}
+    records: list[CleanupRecord] = []
+    for placement in sorted(observed.placements, key=lambda item: item.node):
+        if placement.desired:
+            continue
+        acknowledged = placement.phase is PlacementPhase.CLEANED
+        if acknowledged:
+            state = CleanupState.ACKNOWLEDGED
+        elif placement.node not in ready:
+            state = CleanupState.BLOCKED
+        else:
+            state = CleanupState.REQUESTED
+        records.append(
+            CleanupRecord(
+                identity=placement.identity,
+                node=placement.node,
+                revision=placement.revision,
+                generation=placement.generation,
+                reason=placement.reason or CleanupReason.RELOCATED,
+                state=state,
+                acknowledged=acknowledged,
+                message=_cleanup_message(static_set, placement, node_ready=placement.node in ready),
+            )
+        )
+    return records
+
+
+def _cleanup_message(
+    static_set: StaticSet,
+    placement: ObservedPlacement,
+    *,
+    node_ready: bool,
+) -> str:
+    """Explain the cleanup state for status.
+
+    Args:
+        static_set: The StaticSet being reconciled.
+        placement: The placement being removed.
+        node_ready: Whether the node holding the placement reports Ready.
+
+    Returns:
+        The explanation.
+    """
+    if placement.phase is PlacementPhase.CLEANED:
+        return "the node's manager confirmed the static Pod is gone"
+    if not node_ready:
+        policy = static_set.spec.cleanup.on_node_unreachable
+        grace = static_set.spec.cleanup.abandonment_grace_seconds
+        followed = (
+            f", after which an administrator may abandon it following a {grace}s grace period"
+            if policy is NodeUnreachablePolicy.ABANDON_AFTER_GRACE
+            else ""
+        )
+        return (
+            f"node {placement.node} is not Ready, so its manager cannot remove the static Pod; "
+            "cleanup stays pending and the workload may still be running there. "
+            f"The declared policy is {policy.value}" + followed
+        )
+    return (
+        f"the node's manager on {placement.node} has been asked to remove the static Pod; "
+        "the placement stays until it acknowledges removal"
+    )
+
+
+def _health(observed: ObservedState) -> list[WorkloadHealth]:
     """Match observed mirror Pods to placements.
 
     Health is reported separately from installed state and never feeds a decision:
     a placement can be installed and unhealthy, or installed and unobservable.
 
     Args:
-        static_set: The StaticSet being reconciled.
-        placements: The placements computed for this reconcile.
         observed: The snapshot of the cluster.
 
     Returns:
-        The observed workload health, one entry per placement.
+        The observed workload health, one entry per known placement.
     """
-    by_name = {workload.name: workload for workload in observed.workloads}
+    by_placement: dict[str, ObservedWorkload] = {}
+    for workload in observed.workloads:
+        if not workload.placement:
+            continue
+        current = by_placement.get(workload.placement)
+        if current is None or (workload.ready and not current.ready):
+            by_placement[workload.placement] = workload
     health: list[WorkloadHealth] = []
-    for placement in placements:
-        mirror_name = static_pod_name(static_set.metadata.name or "", placement.identity)
-        mirror = by_name.get(mirror_name)
+    for placement in sorted(observed.placements, key=lambda item: item.node):
+        mirror = by_placement.get(placement.identity)
         if mirror is None:
             health.append(
                 WorkloadHealth(
@@ -670,26 +927,11 @@ def _health(
     return health
 
 
-def _desired_count(static_set: StaticSet, observed: ObservedState) -> int:
-    """Return how many placements the specification asks for.
-
-    Args:
-        static_set: The StaticSet being reconciled.
-        observed: The snapshot of the cluster.
-
-    Returns:
-        The desired number of placements.
-    """
-    if static_set.spec.mode is Mode.DAEMON_SET:
-        return len(eligible_nodes(observed.nodes, static_set.spec))
-    return static_set.spec.replicas or 0
-
-
 def _is_ready(
     static_set: StaticSet,
     observed: ObservedState,
     *,
-    placements: list[PlacementStatus],
+    rows: list[PlacementStatus],
     installed: list[PlacementStatus],
 ) -> bool:
     """Return whether every desired placement is installed.
@@ -697,59 +939,21 @@ def _is_ready(
     Args:
         static_set: The StaticSet being reconciled.
         observed: The snapshot of the cluster.
-        placements: The placements computed for this reconcile.
-        installed: The installed subset of those placements.
+        rows: Every observed placement.
+        installed: The installed subset.
 
     Returns:
-        ``True`` when the desired number of placements is installed.
+        ``True`` when the desired number of placements is installed, acknowledged and
+        mirrored, and no placement is being removed.
     """
     desired = _desired_count(static_set, observed)
+    removing = [row for row in rows if row.phase is PlacementPhase.CLEANING]
     if desired == 0:
-        return not placements
-    return len(installed) == desired and len(placements) == desired
-
-
-def _status_without_action(
-    static_set: StaticSet,
-    observed: ObservedState,
-    *,
-    reason: str,
-    message: str,
-) -> StaticSetStatus:
-    """Build the status of a reconcile that deliberately did nothing.
-
-    Args:
-        static_set: The StaticSet being reconciled.
-        observed: The snapshot of the cluster.
-        reason: The condition reason.
-        message: The condition message.
-
-    Returns:
-        The status to publish.
-    """
-    return StaticSetStatus(
-        observed_generation=static_set.metadata.generation or 0,
-        placements=[
-            PlacementStatus(
-                identity=placement.identity,
-                node=placement.node,
-                revision=placement.revision,
-                acknowledged=placement.acknowledged,
-            )
-            for placement in observed.placements
-        ],
-        conditions=[
-            _condition("Synchronized", "False", reason, message, static_set, observed),
-            _condition(
-                "Ready",
-                "Unknown",
-                reason,
-                "readiness cannot be determined before synchronization completes",
-                static_set,
-                observed,
-            ),
-        ],
-    )
+        return not rows
+    if removing or len(rows) != desired or len(installed) != desired:
+        return False
+    mirrored = {workload.placement for workload in observed.workloads if workload.placement}
+    return all(row.identity in mirrored and row.acknowledged for row in installed)
 
 
 def _condition(
@@ -781,120 +985,3 @@ def _condition(
         observed_generation=static_set.metadata.generation,
         last_transition_time=observed.observed_at or None,
     )
-
-
-def cleanup_worker_pod(
-    static_set: StaticSet,
-    *,
-    namespace: str,
-    identity: str,
-    node: str,
-    generation: int,
-    reason: str,
-    pod_name: str,
-) -> dict[str, Any]:
-    """Build the restricted cleanup worker Pod for one placement.
-
-    A cleanup worker exists because an installer can disappear before it performed
-    the cleanup it was asked to perform. The worker is deliberately narrow: it is
-    pinned to one node, it mounts only the two directories an installer mounts, and
-    it carries a finalizer so that the operator does not release the StaticSet's
-    finalizer while the worker is still holding local state.
-
-    Args:
-        static_set: The StaticSet the placement belongs to.
-        namespace: The namespace to create the worker in.
-        identity: The placement identity.
-        node: The node the workload lives on.
-        generation: The StaticSet generation.
-        reason: Why the cleanup is happening.
-        pod_name: The static Pod's name.
-
-    Returns:
-        The cleanup worker Pod manifest.
-    """
-    installer = static_set.spec.installer
-    name = cleanup_worker_name(static_set.metadata.name or "", identity)
-    labels = {**installer_labels(static_set.metadata.name or ""), PLACEMENT_LABEL: identity}
-    return {
-        "apiVersion": "v1",
-        "kind": "Pod",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-            "labels": {
-                **labels,
-                "app.kubernetes.io/component": "cleanup",
-                "app.kubernetes.io/managed-by": MANAGED_BY,
-            },
-            "annotations": {
-                "staticsets.cloudlane.dev/cleanup-reason": reason,
-                ANNOTATION_PLACEMENT: identity,
-                ANNOTATION_GENERATION: str(generation),
-            },
-            "finalizers": [CLEANUP_FINALIZER],
-            "ownerReferences": [
-                {
-                    "apiVersion": static_set.apiVersion,
-                    "kind": static_set.kind,
-                    "name": static_set.metadata.name,
-                    "uid": static_set.metadata.uid,
-                    "controller": False,
-                    "blockOwnerDeletion": True,
-                }
-            ]
-            if static_set.metadata.uid
-            else [],
-        },
-        "spec": {
-            "restartPolicy": "Never",
-            "nodeName": node,
-            "serviceAccountName": installer_service_account(),
-            "enableServiceLinks": False,
-            "securityContext": {"runAsUser": 0, "seccompProfile": {"type": "RuntimeDefault"}},
-            "containers": [
-                {
-                    "name": INSTALLER_CONTAINER,
-                    "image": installer.image,
-                    "imagePullPolicy": installer.image_pull_policy.value,
-                    "command": list(CLEANUP_COMMAND),
-                    "env": [
-                        {"name": "STATIC_SETS_SET", "value": static_set.metadata.name or ""},
-                        {"name": "STATIC_SETS_NAMESPACE", "value": namespace},
-                        {"name": "STATIC_SETS_UID", "value": static_set.metadata.uid or ""},
-                        {"name": "STATIC_SETS_GENERATION", "value": str(generation)},
-                        {"name": "STATIC_SETS_NODE", "value": node},
-                        {"name": "STATIC_SETS_PLACEMENT", "value": identity},
-                        {"name": "STATIC_SETS_POD_NAME", "value": pod_name},
-                        {"name": "STATIC_SETS_STATIC_POD_PATH", "value": installer.static_pod_path},
-                        {"name": "STATIC_SETS_BUNDLE_DIR", "value": installer.bundle_dir},
-                    ],
-                    "resources": {
-                        "requests": {"cpu": "10m", "memory": "32Mi"},
-                        "limits": {"memory": "128Mi"},
-                    },
-                    "volumeMounts": [
-                        {"name": STATIC_POD_MOUNT, "mountPath": installer.static_pod_path},
-                        {"name": BUNDLE_MOUNT, "mountPath": installer.bundle_dir},
-                    ],
-                    "securityContext": {
-                        "allowPrivilegeEscalation": False,
-                        "privileged": False,
-                        "readOnlyRootFilesystem": True,
-                        "capabilities": {"drop": ["ALL"]},
-                        "seccompProfile": {"type": "RuntimeDefault"},
-                    },
-                }
-            ],
-            "volumes": [
-                {
-                    "name": STATIC_POD_MOUNT,
-                    "hostPath": {"path": installer.static_pod_path, "type": "Directory"},
-                },
-                {
-                    "name": BUNDLE_MOUNT,
-                    "hostPath": {"path": installer.bundle_dir, "type": "DirectoryOrCreate"},
-                },
-            ],
-        },
-    }

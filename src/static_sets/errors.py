@@ -8,6 +8,7 @@ failing silently.
 from __future__ import annotations
 
 __all__ = [
+    "ApiUnavailableError",
     "CleanupError",
     "DefinitionError",
     "InstallationError",
@@ -19,6 +20,15 @@ __all__ = [
     "TranslationError",
     "UnsupportedFieldError",
 ]
+
+
+class ApiUnavailableError(RuntimeError):
+    """The Kubernetes API could not be reached at all.
+
+    The manager catches this and treats it as "retain everything", never as "the
+    desired state is empty": a host that cannot reach the API must keep the static
+    Pod it already runs, because that is the whole point of a static Pod.
+    """
 
 
 class StaticSetsError(Exception):

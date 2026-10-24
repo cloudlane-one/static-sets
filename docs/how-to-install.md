@@ -15,10 +15,10 @@ docker build -f deploy/Dockerfile -t ghcr.io/EXAMPLE/static-sets:0.1.0 .
 docker push ghcr.io/EXAMPLE/static-sets:0.1.0
 ```
 
-One image carries both halves of the operator: the controller that decides what
-should exist, and the `static-set-installer` command that writes the static Pod on
-the node it runs on. Both are derived from the same library, so they cannot disagree
-about the revision hashing or the ownership protocol.
+One image carries both processes: the controller that decides what should exist and
+where, and the node manager that writes the static Pods on each host. Both are derived
+from the same library, so they cannot disagree about the revision hashing or the
+ownership protocol.
 
 ## 2. Install the chart
 
@@ -29,9 +29,25 @@ helm install static-sets ./deploy/helm/static-sets \
   --set image.tag=0.1.0
 ```
 
-The chart runs the controller in one namespace and manages StaticSets in that
-namespace, which is what makes its namespaced roles sufficient. Point
-`--set watchNamespace=elsewhere` somewhere else only if you also widen the RBAC.
+The controller is **cluster-wide**: a `StaticSet` may live in any namespace, and the
+node that serves a placement is named by the placement rather than by its namespace.
+The chart therefore installs a `Deployment`, a `DaemonSet` (one manager Pod per node),
+a cluster-scoped `RuntimeClass` the scheduling probes ask for, and two `ClusterRole`s —
+one for each process, neither of which can do the other's job.
+
+The manager mounts two host paths on every node: kubelet's static Pod directory
+(`manager.staticPodPath`, default `/etc/kubernetes/manifests`) and its bundle
+(`manager.bundleDir`, default `/var/lib/static-sets`). Both are values, and a node
+whose kubelet is configured differently needs them set accordingly:
+
+```shell
+helm install static-sets ./deploy/helm/static-sets   --namespace static-sets --create-namespace   --set manager.staticPodPath=/var/lib/kubelet/manifests
+```
+
+If your cluster manages `RuntimeClass` objects centrally, set
+`probe.createRuntimeClass=false` and create
+`staticsets-scheduling-probe` yourself — it must have a handler no container runtime
+implements, because a probe Pod that could start would run next to the workload.
 
 ## 3. Decide about the admission webhook
 
@@ -58,7 +74,10 @@ time: a privileged workload, a Secret read into the environment.
 
 ```shell
 kubectl -n static-sets rollout status deployment/static-sets
+kubectl -n static-sets rollout status daemonset/static-sets-manager
 kubectl get crd staticsets.staticsets.cloudlane.dev
+kubectl get crd staticpodplacements.staticsets.cloudlane.dev
+kubectl get runtimeclass staticsets-scheduling-probe
 ```
 
 Then follow [How to write a StaticSet](./how-to-write-a-static-set.md).
@@ -76,8 +95,9 @@ helm upgrade static-sets ./deploy/helm/static-sets --namespace static-sets \
   --set image.repository=ghcr.io/EXAMPLE/static-sets --set image.tag=0.2.0
 ```
 
-Installers are replaced on the next reconcile, and each replacement adopts the
-placement its predecessor left, so an upgrade does not reinstall the workloads.
+Manager Pods are replaced by the DaemonSet, and each replacement adopts the placements
+its predecessor left, so an upgrade does not reinstall the workloads. Only the
+controller is `Recreate`: two controllers reconciling the same objects collide.
 
 **Schema changes need the CRD applied by hand.** Helm installs CRDs from `crds/` and
 never upgrades them:
@@ -101,6 +121,7 @@ optional fields, which is the reason to keep schema changes additive.
 ```shell
 helm uninstall static-sets --namespace static-sets
 kubectl delete crd staticsets.staticsets.cloudlane.dev
+kubectl delete crd staticpodplacements.staticsets.cloudlane.dev
 ```
 
 Deleting the CRD deletes every StaticSet, and each one's finalizer keeps it alive

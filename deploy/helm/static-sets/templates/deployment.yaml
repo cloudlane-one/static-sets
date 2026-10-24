@@ -42,11 +42,14 @@ spec:
           # The command names the entry point explicitly rather than relying on the
           # image default, so the chart is the one place that decides whether the
           # admission webhook is served.
+          #
+          # No `--namespace` is passed: the controller is cluster-wide on purpose. A
+          # StaticSet may live in any namespace, and the node that serves a placement
+          # is named by the placement, not by that namespace.
           command:
             - kopf
             - run
             - app/static_sets_operator.py
-            - --namespace={{ include "static-sets.watchNamespace" . }}
             {{- if .Values.webhook.enabled }}
             - -m
             - based_operators.webhook
@@ -64,11 +67,11 @@ spec:
           env:
             - name: STATIC_SETS_WEBHOOK
               value: {{ ternary "1" "0" .Values.webhook.enabled | quote }}
-            # The installer workload and the cleanup workers run as this account. The
-            # chart owns the account, so it tells the operator which name it created
-            # rather than letting the operator invent one admission would refuse.
-            - name: STATIC_SETS_INSTALLER_SERVICE_ACCOUNT
-              value: {{ include "static-sets.installerServiceAccountName" . | quote }}
+            # The placeholder runtime class a scheduling probe asks for. It is the
+            # chart's cluster-scoped object, so the chart names it rather than letting
+            # the operator invent one that no RuntimeClass object backs.
+            - name: STATIC_SETS_PROBE_RUNTIME_CLASS
+              value: {{ .Values.probe.runtimeClassName | quote }}
             {{- if .Values.webhook.enabled }}
             - name: WEBHOOK_CERT_DIR
               value: /etc/webhook/certs

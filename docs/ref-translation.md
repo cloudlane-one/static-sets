@@ -66,7 +66,7 @@ unreadable, so the template must state `volumes[].secret.defaultMode` explicitly
 is refused rather than guessed at:
 
 ```
-container 'web' mounts Secret volume 'tls' without a defaultMode; the installer writes
+container 'web' mounts Secret volume 'tls' without a defaultMode; the manager writes
 Secret files as 0400, which a non-root container cannot read. Set
 spec.template.spec.volumes[].secret.defaultMode explicitly, or declare the container as
 root with securityContext.runAsUser: 0
@@ -79,12 +79,12 @@ root with securityContext.runAsUser: 0
 | `configMap` | Materialized as files under the revision directory (`0644` by default), mounted read-only as a `hostPath`. `items` selects keys, renames them and sets per-file modes; `optional` makes an absent ConfigMap or key acceptable. |
 | `secret` | As above, under a `secrets/` directory, with `0400` as the default mode. |
 | `emptyDir` | Passed through unchanged: kubelet provides it without the API server. |
-| `hostPath` | **Refused.** The only `hostPath` mounts in the manifest are the revision directories the operator materialized, which keeps the workload inside the bundle the installer owns. |
+| `hostPath` | **Refused.** The only `hostPath` mounts in the manifest are the revision directories the operator materialized, which keeps the workload inside the bundle the manager owns. |
 | `persistentVolumeClaim` | **Refused.** Attaching a volume needs the API server and a bound PV. |
 | `projected`, `downwardAPI`, `nfs`, … | **Refused.** Each needs a source that will not exist offline. |
 
 `volumeMounts[].subPath`, `subPathExpr`, `mountPropagation` and `recursiveReadOnly`
-are refused: they change path semantics against a volume the installer owns, and a
+are refused: they change path semantics against a volume the manager owns, and a
 sub-path would escape the directory that was validated.
 
 Item paths are validated, so an item cannot map a key outside its own volume

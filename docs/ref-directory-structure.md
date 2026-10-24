@@ -9,13 +9,16 @@ on top. Where a directory holds project-specific content, it is described below.
   - `static_sets_operator.py`: the controller entry point. This is the file
     `kopf run` executes inside the operator image, and the file the
     `based-operators` scaffolder loads to derive the CRD and the chart.
-  - `static_sets_installer/`: the installer command that runs inside an installer
-    Pod — it compiles the StaticSet, writes the static Pod on its own node, and
-    acknowledges it. Also installable as the `static-set-installer` console script.
-  - `render_crds.py`: regenerates the CRD in the chart from the Pydantic models, so
-    the committed schema cannot drift from the type the operator reconciles.
+  - `static_pod_manager.py`: the node manager entry point. `kopf run` executes it
+    inside the manager DaemonSet, one Pod per node; it watches placement records and
+    writes the static Pods on the node it runs on.
+  - `static_sets_manager/`: the `static-set-manager` command, which runs the same
+    library once (or repeatedly) for one node without kopf — what an operator reaches
+    for when debugging a single host. Also ships as a console script.
+  - `render_crds.py`: regenerates both CRDs in the chart from the Pydantic models, so
+    the committed schemas cannot drift from the types the operator reconciles.
 - `deploy`: What a cluster needs to run the operator
-  - `Dockerfile`: the operator image, carrying both the controller and the installer.
+  - `Dockerfile`: the operator image, carrying both the controller and the manager.
   - `helm/static-sets/`: the chart, including `crds/` (the generated CRD), the RBAC
     for both identities, and the optional admission webhook.
   - `samples/`: StaticSets that the test suite validates, so they always describe
@@ -29,9 +32,13 @@ on top. Where a directory holds project-specific content, it is described below.
   - `static_sets/translation.py`: the compiler, and what it refuses.
   - `static_sets/revision.py`: deterministic revision identity.
   - `static_sets/install.py`: durable installation, ownership and cleanup on a node.
-  - `static_sets/installer.py`: the on-node runtime, including offline behaviour.
-  - `static_sets/placement.py`: installer placement and the installer workload.
-  - `static_sets/controller.py`: the pure reconcile planner and the status builder.
+  - `static_sets/placements.py`: the `StaticPodPlacement` record — one node's static
+    Pod for one StaticSet.
+  - `static_sets/probe.py`: the scheduling probe, which is how the Kubernetes
+    scheduler is asked for a placement.
+  - `static_sets/controller.py`: the pure reconcile planner and status builder.
+  - `static_sets/manager.py`: the on-node runtime, including the rollout order.
+  - `static_sets/cluster.py`: the cluster-backed implementation of the manager's API.
   - `static_sets/paths.py`: path validation and durable write primitives.
   - `static_sets/api.py`: the official Kubernetes client, configured for the
     operator, with failures classified as "refused" or "unreachable" and absence
@@ -41,7 +48,7 @@ on top. Where a directory holds project-specific content, it is described below.
 - `tests`: Code for automated testing of library modules and applications (via
   [pytest](https://pypi.org/project/pytest/))
   - `tests/src/`: unit tests for the library, one module per unit of behaviour.
-  - `tests/app/`: tests for the entry points, the installer command and the shipped
+  - `tests/app/`: tests for the entry points, the manager command and the shipped
     manifests (including chart rendering and CRD drift).
   - `tests/test_e2e.py`: the end-to-end suite against a real cluster, opt-in.
 - `.dockerignore`: Files excluded from the image build context

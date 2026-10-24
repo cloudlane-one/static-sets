@@ -18,7 +18,8 @@ spec:
     storage: true
     schema:
       openAPIV3Schema:
-        description: A namespaced set of static Pods, managed through installer Pods.
+        description: A namespaced set of static Pods, placed by the scheduler and
+          written per node.
         properties:
           apiVersion:
             type: string
@@ -30,8 +31,7 @@ spec:
             description: What a user asks for.
             properties:
               mode:
-                description: How many installers the operator creates, and where they
-                  land.
+                description: How many placements the operator asks the scheduler for.
                 enum:
                 - Deployment
                 - DaemonSet
@@ -1724,6 +1724,12 @@ spec:
                         default: Always
                         title: Restartpolicy
                         type: string
+                      runtimeClassName:
+                        title: Runtimeclassname
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                        nullable: true
                       terminationGracePeriodSeconds:
                         title: Terminationgraceperiodseconds
                         type: integer
@@ -3606,119 +3612,9 @@ spec:
                     type: boolean
                 title: WorkloadPolicy
                 type: object
-              installer:
-                description: The installer image and the exact host paths it is allowed
-                  to touch.
-                properties:
-                  image:
-                    minLength: 1
-                    title: Image
-                    type: string
-                  imagePullPolicy:
-                    description: 'Supported ``imagePullPolicy`` values.
-
-
-                      ``Never`` is the only policy that is safe on a disconnected
-                      host, because it
-
-                      never contacts a registry. ``IfNotPresent`` is the default and
-                      is safe as long
-
-                      as the image is already present.'
-                    enum:
-                    - Always
-                    - IfNotPresent
-                    - Never
-                    title: PullPolicy
-                    type: string
-                    default: IfNotPresent
-                  staticPodPath:
-                    default: /etc/kubernetes/manifests
-                    minLength: 1
-                    title: Staticpodpath
-                    type: string
-                  bundleDir:
-                    default: /var/lib/static-sets
-                    minLength: 1
-                    title: Bundledir
-                    type: string
-                  resources:
-                    description: 'Container resource requests and limits, from the
-                      official Kubernetes type.
-
-
-                      ``claims`` belongs to the scheduler, which never sees a static
-                      Pod: kubelet
-
-                      starts it from a file and cannot resolve a claim. It is refused
-                      rather than
-
-                      written into a manifest that would silently never take effect.'
-                    properties:
-                      claims:
-                        description: Claims lists the names of resources, defined
-                          in spec.resourceClaims, that are used by this container.  This
-                          field depends on the DynamicResourceAllocation feature gate.  This
-                          field is immutable. It can only be set for containers.
-                        title: Claims
-                        items:
-                          description: "ResourceClaim references one entry in PodSpec.ResourceClaims.\n\
-                            \nAttributes:\n  openapi_types (dict): The key is attribute\
-                            \ name\n                        and the value is attribute\
-                            \ type.\n  attribute_map (dict): The key is attribute\
-                            \ name\n                        and the value is json\
-                            \ key in definition."
-                          properties:
-                            name:
-                              description: Name must match the name of one entry in
-                                pod.spec.resourceClaims of the Pod where this field
-                                is used. It makes that resource available inside a
-                                container.
-                              title: Name
-                              type: string
-                            request:
-                              description: Request is the name chosen for a request
-                                in the referenced claim. If empty, everything from
-                                the claim is made available, otherwise only the result
-                                of this request.
-                              title: Request
-                              type: string
-                              nullable: true
-                          required: *id011
-                          title: CoreV1ResourceClaim
-                          type: object
-                        type: array
-                        nullable: true
-                      limits:
-                        description: 'Limits describes the maximum amount of compute
-                          resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
-                        title: Limits
-                        additionalProperties:
-                          type: string
-                        type: object
-                        nullable: true
-                      requests:
-                        description: 'Requests describes the minimum amount of compute
-                          resources required. If Requests is omitted for a container,
-                          it defaults to Limits if that is explicitly specified, otherwise
-                          to an implementation-defined value. Requests cannot exceed
-                          Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
-                        title: Requests
-                        additionalProperties:
-                          type: string
-                        type: object
-                        nullable: true
-                    title: ResourceRequirements
-                    type: object
-                    nullable: true
-                required:
-                - image
-                title: InstallerSpec
-                type: object
             required:
             - mode
             - template
-            - installer
             title: StaticSetSpec
             type: object
           status:
@@ -3728,6 +3624,10 @@ spec:
                 default: 0
                 title: Observedgeneration
                 type: integer
+              placedGeneration:
+                default: 0
+                title: Placedgeneration
+                type: integer
               desiredRevision:
                 title: Desiredrevision
                 type: string
@@ -3735,7 +3635,7 @@ spec:
               placements:
                 items:
                   description: The installed state of one placement, as acknowledged
-                    by its installer.
+                    by its node's manager.
                   properties:
                     identity:
                       title: Identity
@@ -3748,10 +3648,12 @@ spec:
                       type: string
                       nullable: true
                     phase:
-                      description: The lifecycle of one installer placement.
+                      description: The lifecycle of one placement.
                       enum:
                       - Pending
+                      - Installing
                       - Installed
+                      - Retiring
                       - Cleaning
                       - Cleaned
                       - Failed
@@ -3852,11 +3754,9 @@ spec:
                       title: CleanupReason
                       type: string
                     state:
-                      description: Where a cleanup intent is in the protocol of section
-                        7.
+                      description: Where a cleanup intent stands.
                       enum:
                       - Requested
-                      - Queued
                       - Acknowledged
                       - Blocked
                       - Abandoned

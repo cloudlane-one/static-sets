@@ -1,5 +1,9 @@
-# A StaticSet in Deployment mode: two installer Pods, wherever the scheduler puts
-# them, each turning its own node into a host of the workload.
+# A StaticSet in Deployment mode: two placements, wherever the scheduler puts them.
+#
+# The controller asks the scheduler by creating a scheduling probe, a ReplicaSet whose
+# Pods carry the resources and placement rules below. The Pods are bound to nodes and
+# never start: they run under a RuntimeClass no container runtime implements. Each
+# node whose Pod was bound then gets the real static Pod, and the probe is deleted.
 #
 # Apply the referenced configuration first (see configmap.yaml).
 apiVersion: staticsets.cloudlane.dev/v1
@@ -11,9 +15,9 @@ spec:
   mode: Deployment
   replicas: 2
 
-  # Placement steers the *scheduler*, which places the installer Pods. It is not
-  # copied onto the emitted static workload, because kubelet never schedules a
-  # static Pod: it starts the file it finds, on the node whose kubelet finds it.
+  # Placement steers the *scheduler*, which places the probe Pods. It is not copied
+  # onto the emitted static workload, because kubelet never schedules a static Pod: it
+  # starts the file it finds, on the node whose kubelet finds it.
   placement:
     nodeSelector:
       kubernetes.io/os: linux
@@ -65,14 +69,12 @@ spec:
             name: web-conf
 
   update:
-    # Recreate is the conservative default: the old placement is retired before a
-    # new one is installed, so a node never holds two revisions of the same
-    # StaticSet at once.
+    # Recreate is the conservative default: the old static Pod is removed before the
+    # new one is written, so a node never holds two revisions of the same StaticSet at
+    # once. Surge writes the new one first and retires the old one once the new Pod is
+    # observed running.
     strategy: Recreate
 
   offline:
     retainedRevisions: 2
 
-  installer:
-    image: ghcr.io/cloudlane-one/static-sets:0.1.0
-    imagePullPolicy: IfNotPresent

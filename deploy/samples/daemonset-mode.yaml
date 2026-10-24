@@ -1,9 +1,9 @@
-# A StaticSet in DaemonSet mode: one installer on every node the selector admits,
-# so every eligible node hosts the workload.
+# A StaticSet in DaemonSet mode: one placement on every node the placement filters
+# admit, so every eligible node hosts the workload.
 #
-# DaemonSet mode takes no replica count: the DaemonSet controller decides how many
-# installers exist, and the operator computes the eligible nodes only to report
-# whether every one of them has acknowledged its installation.
+# DaemonSet mode takes no replica count: the scheduling probe is a DaemonSet, so its
+# controller decides how many placements a pass asks for, and it keeps noticing nodes
+# that join. The StaticSet's own readiness is computed from the eligible nodes.
 apiVersion: staticsets.cloudlane.dev/v1
 kind: StaticSet
 metadata:
@@ -44,5 +44,3 @@ spec:
     # The default, stated explicitly: a privileged static Pod is refused.
     allowPrivileged: false
 
-  installer:
-    image: ghcr.io/cloudlane-one/static-sets:0.1.0

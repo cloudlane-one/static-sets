@@ -93,9 +93,11 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@v4
 
-      # A throwaway cluster. The suite installs the chart, creates a StaticSet,
-      # checks the static Pod manifest the installer wrote on the node, and deletes
-      # the StaticSet again to exercise the cleanup protocol.
+      # A throwaway cluster. The suite installs the chart, creates a StaticSet, waits
+      # for the scheduler's probe to be placed, for the node manager to write the
+      # manifest and for kubelet to publish the mirror Pod, then deletes the StaticSet
+      # again to exercise the cleanup protocol. The default staticPodPath is kubeadm's,
+      # which is what kind uses; k3s needs STATIC_SETS_STATIC_POD_PATH.
       - name: Create a kind cluster
         uses: helm/kind-action@v1
         with:
