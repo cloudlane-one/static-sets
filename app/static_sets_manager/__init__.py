@@ -26,7 +26,8 @@ import typer
 from static_sets.api import ApiRequestError, ApiUnavailableError, KubernetesClient
 from static_sets.cluster import ClusterApi
 from static_sets.errors import StaticSetsError
-from static_sets.manager import ManagerConfig, PlacementReport, cleanup, reconcile
+from static_sets.manager import ManagerConfig, PlacementReport, cleanup
+from static_sets.manager import reconcile as reconcile_placement
 from static_sets.models import CleanupReason, PlacementPhase
 from static_sets.placements import StaticPodPlacement
 
@@ -45,8 +46,18 @@ app = typer.Typer(
 """The Typer application behind the ``static-set-manager`` command."""
 
 
+@app.callback()
+def root() -> None:
+    """Reconcile the static Pods of the node this command runs on.
+
+    A callback exists for more than its docstring: Typer collapses an application with
+    exactly one command into that command, which would make ``reconcile`` an unexpected
+    extra argument instead of a subcommand.
+    """
+
+
 @app.command()
-def manage(
+def reconcile(
     timeout: Annotated[
         float,
         typer.Option(
@@ -171,7 +182,7 @@ def _reconcile_placement(
     try:
         assignment = config.assignment(placement)
         if placement.spec.desired:
-            report = reconcile(assignment, api=api, now=timestamp)
+            report = reconcile_placement(assignment, api=api, now=timestamp)
         else:
             report = cleanup(
                 assignment,

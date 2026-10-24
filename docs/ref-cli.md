@@ -22,7 +22,7 @@ what the command actually accepts:
     :pretty: true
     :engine: native
 
-`manage` repeats its pass every `--interval` seconds by default, so a configuration
+`reconcile` repeats its pass every `--interval` seconds by default, so a configuration
 change, a moved revision or a cleanup request published just after the previous pass is
 noticed without waiting for anything; `--interval 0` runs one pass and exits.
 

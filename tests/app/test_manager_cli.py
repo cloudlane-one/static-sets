@@ -204,7 +204,7 @@ def test_a_refusal_is_reported_on_the_placement(
 
         raise TranslationError("volumes[].hostPath is not supported")
 
-    monkeypatch.setattr(manager_cli, "reconcile", refuse)
+    monkeypatch.setattr(manager_cli, "reconcile_placement", refuse)
 
     status = manager_cli.run(environ=environment, client=CLIENT, interval=0)
 

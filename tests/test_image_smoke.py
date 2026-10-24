@@ -94,7 +94,7 @@ def test_the_console_script_an_operator_uses_is_on_path(image: str) -> None:
     result = _inside(image, "static-set-manager", "--help")
 
     assert result.returncode == 0
-    assert "manage" in result.stdout
+    assert "reconcile" in result.stdout
 
 
 def test_kopf_is_installed(image: str) -> None:
@@ -126,7 +126,7 @@ def test_both_entry_points_start_inside_the_image(image: str) -> None:
 
 def test_the_manager_command_fails_cleanly_without_an_environment(image: str) -> None:
     """No node and no cluster: report it and exit, do not hang or traceback."""
-    result = _inside(image, "static-set-manager", "manage", check=False)
+    result = _inside(image, "static-set-manager", "reconcile", check=False)
 
     assert result.returncode == 2, result.stdout + result.stderr
     assert "invalid-environment" in result.stdout
