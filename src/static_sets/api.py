@@ -48,17 +48,21 @@ from kubernetes.client import (
     V1DaemonSet,
     V1Deployment,
     V1Pod,
+    V1ReplicaSet,
 )
 from kubernetes.client.rest import RESTResponse
 from kubernetes.config.config_exception import ConfigException
 from kubernetes.config.incluster_config import InClusterConfigLoader
 
-from static_sets.installer import ApiUnavailableError
+from static_sets.errors import ApiUnavailableError
+from static_sets.placements import StaticPodPlacement
 
 __all__ = [
     "ApiRequestError",
     "KubernetesClient",
     "KubernetesObject",
+    "apply_placement",
+    "delete_placement",
     "or_none",
     "upsert",
 ]
@@ -69,7 +73,7 @@ SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 DEFAULT_TIMEOUT = 15.0
 """Seconds to wait for the API server before declaring it unreachable."""
 
-type KubernetesObject = V1ConfigMap | V1Deployment | V1DaemonSet | V1Pod
+type KubernetesObject = V1ConfigMap | V1Deployment | V1DaemonSet | V1ReplicaSet | V1Pod
 """The built-in objects this operator creates or replaces."""
 
 
@@ -347,8 +351,98 @@ _GROUPS: dict[type[Any], tuple[str, str]] = {
     V1Pod: ("core", "pod"),
     V1Deployment: ("apps", "deployment"),
     V1DaemonSet: ("apps", "daemon_set"),
+    V1ReplicaSet: ("apps", "replica_set"),
 }
 """Where each applied kind lives: its API group and its generated method stem."""
+
+
+def apply_placement(
+    client: KubernetesClient,
+    placement: StaticPodPlacement,
+) -> None:
+    """Create a placement record, or replace the wanted parts of an existing one.
+
+    Only the spec and the labels are written, because the status is the *node's*
+    report and the controller must never overwrite what a manager learned. A replace
+    would do exactly that, so this is a merge patch over spec only.
+
+    Args:
+        client: The client whose API groups are used.
+        placement: The placement to apply.
+
+    Raises:
+        ValueError: If the object has no name or namespace.
+        ApiUnavailableError: If the API could not be reached.
+        ApiRequestError: If the API refused the write.
+    """
+    metadata = placement.metadata
+    if not metadata.name or not metadata.namespace:
+        raise ValueError("a StaticPodPlacement needs a name and a namespace to be applied")
+    config = StaticPodPlacement._require_resource_config()
+    body = {
+        "spec": placement.spec.model_dump(by_alias=True, mode="json", exclude_none=True),
+        "metadata": {"labels": dict(metadata.labels or {})},
+    }
+    existing = or_none(
+        client.custom.get_namespaced_custom_object,
+        config.group,
+        config.version,
+        metadata.namespace,
+        config.plural,
+        metadata.name,
+    )
+    if existing is None:
+        create_body = {
+            **body,
+            "apiVersion": f"{config.group}/{config.version}",
+            "kind": config.kind,
+            "metadata": {
+                "name": metadata.name,
+                "namespace": metadata.namespace,
+                "labels": dict(metadata.labels or {}),
+                "annotations": dict(metadata.annotations or {}),
+                "ownerReferences": [dict(item) for item in metadata.owner_references or []],
+            },
+        }
+        client.custom.create_namespaced_custom_object(
+            config.group,
+            config.version,
+            metadata.namespace,
+            config.plural,
+            create_body,
+        )
+        return
+    client.custom.patch_namespaced_custom_object(
+        config.group,
+        config.version,
+        metadata.namespace,
+        config.plural,
+        metadata.name,
+        body,
+    )
+
+
+def delete_placement(client: KubernetesClient, namespace: str, name: str) -> None:
+    """Delete a placement record, tolerating its absence.
+
+    Args:
+        client: The client whose API groups are used.
+        namespace: The placement's namespace.
+        name: The placement's name.
+
+    Raises:
+        ApiUnavailableError: If the API could not be reached.
+        ApiRequestError: If the API refused the delete.
+    """
+    config = StaticPodPlacement._require_resource_config()
+    or_none(
+        client.custom.delete_namespaced_custom_object,
+        config.group,
+        config.version,
+        namespace,
+        config.plural,
+        name,
+    )
 
 
 def _configuration_from_environment(environ: Mapping[str, str]) -> Configuration:

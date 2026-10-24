@@ -10,7 +10,7 @@ only so that they can be rejected with an actionable message:
 
 **Scheduler placement versus the emitted static workload.**
 Fields such as ``nodeSelector``, ``affinity``, ``tolerations`` and
-``topologySpreadConstraints`` decide *which node* an installer is scheduled onto.
+``topologySpreadConstraints`` decide *which node* the scheduling probe is scheduled onto.
 kubelet never schedules a static Pod: it starts whatever file it finds, on the
 node whose kubelet finds it. Placement therefore belongs to
 ``spec.placement`` of the StaticSet, and the operator strips those fields from the
@@ -457,6 +457,24 @@ class PodSpec(WireModel):
     init_containers: list[Container] | None = None
     volumes: list[Volume] | None = None
     restart_policy: Literal["Always"] = "Always"
+    runtime_class_name: str | None = Field(default=None, min_length=1, max_length=63)
+    """The ``RuntimeClass`` the static Pod is started with.
+
+    Passed through to the manifest because a workload may legitimately need a
+    non-default runtime (a sandboxed or a GPU runtime). Note what it costs: kubelet
+    resolves a ``RuntimeClass`` through its own cache of the API object, so a
+    workload that declares one is *not* guaranteed to start on a host reboot that
+    happens while the API server is unreachable. Leave it unset for a workload whose
+    whole point is to come back disconnected.
+
+    The scheduling probe cannot use it — the probe must never start — so it is
+    carried on the probe's ``staticsets.cloudlane.dev/runtime-class`` label and
+    applied when the manifest is rendered.
+
+    The limit is 63 characters because the value doubles as a label value; a
+    ``RuntimeClass`` name is a DNS subdomain, which longer names would also be.
+    """
+
     termination_grace_period_seconds: int | None = None
     dns_policy: Literal["ClusterFirstWithHostNet", "ClusterFirst", "Default", "None"] | None = None
     dns_config: DnsConfig | None = None
@@ -528,9 +546,9 @@ class PodSpec(WireModel):
         for field, value in placement.items():
             if value is not None:
                 raise ValueError(
-                    f"spec.template.spec.{field} controls installer placement and belongs "
-                    "under spec.placement; the emitted static workload carries no scheduler "
-                    "placement fields"
+                    f"spec.template.spec.{field} controls where the scheduling probe runs and "
+                    "belongs under spec.placement; the emitted static workload carries no "
+                    "scheduler placement fields"
                 )
         return self
 

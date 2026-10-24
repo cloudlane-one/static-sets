@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "static-sets.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-manager
+spec:
+  selector:
+    matchLabels:
+      {{- include "static-sets.managerSelectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: {{ .Values.manager.updateStrategy }}
+  template:
+    metadata:
+      labels:
+        {{- include "static-sets.managerSelectorLabels" . | nindent 8 }}
+        {{- with .Values.manager.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.manager.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "static-sets.managerServiceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The manager writes kubelet's manifest directory, which is root-owned, so it
+      # runs as root — and is otherwise as small as it can be: every capability
+      # dropped, no privilege escalation, a read-only root filesystem and exactly two
+      # host mounts.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: "{{ include "static-sets.managerImage" . }}"
+          imagePullPolicy: {{ include "static-sets.managerImagePullPolicy" . }}
+          command:
+            - kopf
+            - run
+            - app/static_pod_manager.py
+            - --liveness=http://0.0.0.0:8080/healthz
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # Which node this Pod is, and which Pod it is: the first decides what it
+            # manages, the second is the instance identity in its local ownership
+            # records. Neither is guessed.
+            - name: STATIC_SETS_NODE
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: STATIC_SETS_MANAGER_POD
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: STATIC_SETS_STATIC_POD_PATH
+              value: {{ .Values.manager.staticPodPath | quote }}
+            - name: STATIC_SETS_BUNDLE_DIR
+              value: {{ .Values.manager.bundleDir | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: static-pod-path
+              mountPath: {{ .Values.manager.staticPodPath }}
+            - name: bundle
+              mountPath: {{ .Values.manager.bundleDir }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          {{- with .Values.manager.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: static-pod-path
+          hostPath:
+            path: {{ .Values.manager.staticPodPath }}
+            type: Directory
+        - name: bundle
+          hostPath:
+            path: {{ .Values.manager.bundleDir }}
+            type: DirectoryOrCreate
+      {{- with .Values.manager.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.manager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -40,10 +40,11 @@ these are true on the node:
   exact list. A field the operator cannot represent faithfully is *rejected*, never
   dropped, because a static Pod that silently lost a field would start, look healthy,
   and behave differently from the template it came from.
-- **Not a replica count.** `spec.replicas` counts *installer placements*, not running
-  copies of the workload. A placement that is replaced on one node and relocated to
-  another can briefly leave two installers' worth of offline workloads in existence;
-  see [placement and capacity](./about-placement-and-capacity.md).
+- **Not a replica count.** `spec.replicas` counts *placements*, not running copies of
+  the workload. A placement that is relocated can briefly leave two nodes' worth of
+  offline workloads in existence, and a `Surge` rollout deliberately leaves two
+  revisions on one node for a moment; see
+  [placement and capacity](./about-placement-and-capacity.md).
 - **Not an exact replica guarantee during a partition.** A partitioned node keeps
   serving whatever it last installed. Nothing the operator can do from the control
   plane changes that, and pretending otherwise would be the worst outcome.
@@ -51,21 +52,28 @@ these are true on the node:
   the node at install time. A ConfigMap that changes in the cluster becomes a new
   revision; a ConfigMap that changes and is then never reconciled does not.
 
-## Why installer Pods
+## Why a scheduler probe and a node manager
 
-The alternative — writing manifests from the controller — would require the
-controller to have a filesystem relationship with every node, which is both a large
-privilege and a large failure domain. Instead:
+The alternative — writing manifests from the controller — would require the controller
+to have a filesystem relationship with every node, which is both a large privilege and
+a large failure domain. The other alternative — letting a per-node agent pick its own
+work — would throw away the cluster's scheduler, which is the only thing that knows
+about capacity, affinity, taints and topology.
 
-- the **controller** decides what should exist and reports what it observes. It
-  mounts nothing from the host and runs unprivileged;
-- an **installer** Pod is scheduled by Kubernetes, lands on one node, learns that it
-  is there, and writes only that node's workload. It is replaced by the ordinary
-  Deployment or DaemonSet machinery, and a replacement adopts the placement its
-  predecessor left behind.
+So the work is split along that line:
 
-The cost is that installation is asynchronous: a StaticSet is not installed until its
-installer says so, which is why the status distinguishes *installed* state from
+- the **controller** decides what should exist and reports what it observes. It mounts
+  nothing from the host and runs unprivileged. To learn *where* a workload should run,
+  it creates a **scheduling probe** — a ReplicaSet or DaemonSet whose Pods carry the
+  workload's resources and the StaticSet's placement rules, and which run under a
+  runtime class no node can start. The scheduler places them; nothing executes;
+- a **manager** runs once per node, as a DaemonSet, and serves every StaticSet whose
+  placement names its node, in every namespace. It writes, updates and removes the
+  manifests on that node and reports what it did, so a replacement adopts the placement
+  its predecessor left behind rather than creating a second one.
+
+The cost is that installation is asynchronous: a StaticSet is not installed until the
+node's manager says so, which is why the status distinguishes *installed* state from
 *observed* health instead of collapsing both into "ready".
 
 ## Where to go next

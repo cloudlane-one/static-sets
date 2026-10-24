@@ -1,465 +1,631 @@
-"""The reconcile planner: desired state, cleanup intents and status."""
+"""The reconcile plan: when a probe is started, concluded and retired."""
 
 from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from static_sets.controller import (
+    ObservedPlacement,
     ObservedState,
-    ObservedWorkload,
-    cleanup_worker_pod,
+    PlacementChange,
+    ReconcilePlan,
     plan,
 )
-from static_sets.models import CleanupState, PlacementPhase
+from static_sets.models import CleanupReason, PlacementPhase
 from static_sets.naming import placement_identity
-from static_sets.placement import (
-    INSTALLER_SERVICE_ACCOUNT_ENV,
-    InstallerPod,
-    NodeInfo,
-    ObservedPlacement,
-)
+from static_sets.probe import NodeInfo, ObservedProbePod, ObservedProbeWorkload, ObservedWorkload
 
-NOW = "2026-10-12T10:00:00Z"
 UID = "0f9a4b6c-1111-2222-3333-444455556666"
+GENERATION = 3
 
 
-def node(name: str, *, ready: bool = True) -> NodeInfo:
-    """Return a node.
-
-    Args:
-        name: The node name.
-        ready: Whether it reports Ready.
-
-    Returns:
-        The node.
-    """
-    return NodeInfo(name=name, labels={"role": "edge"}, ready=ready)
-
-
-def installer(node_name: str, *, name: str = "pod", deleting: bool = False) -> InstallerPod:
-    """Return an installer Pod bound to a node.
+def identity(node: str) -> str:
+    """Return the placement identity of a node, as the operator derives it.
 
     Args:
-        node_name: The node it runs on.
-        name: Its name.
-        deleting: Whether it carries a deletion timestamp.
+        node: The node name.
 
     Returns:
-        The installer Pod.
+        The identity.
     """
-    return InstallerPod(name=name, uid=f"uid-{name}", node=node_name, deleting=deleting)
+    return placement_identity(UID, node)
 
 
-def ack(
-    node_name: str, *, state: str = "Installed", revision: str = "r-" + "a" * 32
+def placement(
+    node: str,
+    *,
+    desired: bool = True,
+    phase: PlacementPhase = PlacementPhase.INSTALLED,
+    acknowledged: bool = True,
+    generation: int = GENERATION,
+    revision: str | None = "r-11111111111111111111111111111111",
+    reason: CleanupReason | None = None,
 ) -> ObservedPlacement:
-    """Return a placement acknowledgment for a node.
+    """Build one observed placement record.
 
     Args:
-        node_name: The node the placement is on.
-        state: The state the installer reported.
-        revision: The revision it reported.
+        node: The node it is on.
+        desired: Whether it is still wanted.
+        phase: Where it stands.
+        acknowledged: Whether the manager confirmed it.
+        generation: The generation it was placed for.
+        revision: The revision the manager reports.
+        reason: Why it is being removed, when it is not wanted.
 
     Returns:
         The observed placement.
     """
     return ObservedPlacement(
-        identity=placement_identity(UID, node_name),
-        node=node_name,
+        name=f"web-{identity(node)}",
+        identity=identity(node),
+        node=node,
+        desired=desired,
+        reason=reason,
+        generation=generation,
         revision=revision,
-        state=state,
-        acknowledged=state == "Installed",
+        phase=phase,
+        acknowledged=acknowledged,
+        static_pod_name=f"web-{identity(node)}-{revision}",
     )
 
 
-def conditions(status: Any) -> dict[str, str]:
-    """Index a status' conditions by type.
+def probe(
+    *,
+    generation: int = GENERATION,
+    kind: str = "ReplicaSet",
+    nodes: tuple[str, ...] = ("a", "b"),
+    replicas: int | None = None,
+    unscheduled: int = 0,
+    status_seen: bool = True,
+) -> ObservedProbeWorkload:
+    """Build one observed probe workload with a Pod per node.
 
     Args:
-        status: The status.
+        generation: The generation it was created for.
+        kind: ``ReplicaSet`` or ``DaemonSet``.
+        nodes: The nodes its Pods are bound to.
+        replicas: The Pod count it intends; defaults to the number of nodes.
+        unscheduled: How many Pods are still unbound.
+        status_seen: Whether its status has been observed.
 
     Returns:
-        Condition type to status mapping.
+        The observed probe.
     """
-    return {condition.type: condition.status for condition in status.conditions}
+    pods = [ObservedProbePod(f"web-probe-{generation}-{node}", node) for node in nodes]
+    pods.extend(
+        ObservedProbePod(f"web-probe-{generation}-pending-{index}") for index in range(unscheduled)
+    )
+    return ObservedProbeWorkload(
+        kind="DaemonSet" if kind == "DaemonSet" else "ReplicaSet",
+        name=f"web-probe-{generation}",
+        generation=generation,
+        replicas=len(nodes) + unscheduled if replicas is None else replicas,
+        status_seen=status_seen,
+        pods=tuple(pods),
+    )
+
+
+def mirror(node: str, *, ready: bool = True) -> ObservedWorkload:
+    """Build the mirror Pod kubelet publishes for a placement's static Pod.
+
+    Args:
+        node: The node it runs on.
+        ready: Whether it reports Ready.
+
+    Returns:
+        The observed workload.
+    """
+    return ObservedWorkload(
+        name=f"web-{identity(node)}-r-1",
+        node=node,
+        placement=identity(node),
+        revision="r-11111111111111111111111111111111",
+        phase="Running",
+        ready=ready,
+    )
+
+
+def nodes(*additions: NodeInfo) -> tuple[NodeInfo, ...]:
+    """Build the cluster's nodes, ready unless a caller says otherwise.
+
+    Args:
+        *additions: Nodes to add; ``a`` and ``b`` are always present.
+
+    Returns:
+        The nodes.
+    """
+    base = [NodeInfo("a", {}, ready=True), NodeInfo("b", {}, ready=True)]
+    return (*base, *additions)
+
+
+def run(
+    make_static_set: Any,
+    *,
+    state: ObservedState | None = None,
+    **overrides: Any,
+) -> ReconcilePlan:
+    """Compute a plan for the base StaticSet.
+
+    Args:
+        make_static_set: The fixture factory.
+        state: The observed state, defaulting to an empty, synchronized one.
+        **overrides: StaticSet body overrides.
+
+    Returns:
+        The plan.
+    """
+    resource = make_static_set(**overrides)
+    return plan(resource, state or ObservedState(nodes=nodes()), namespace="edge")
+
+
+def applied(plan_result: ReconcilePlan) -> list[str]:
+    """Return the nodes a plan writes a placement for.
+
+    Args:
+        plan_result: The plan.
+
+    Returns:
+        The nodes of the applied placements.
+    """
+    return sorted(
+        change.spec.node
+        for change in plan_result.placements
+        if change.kind == "apply" and change.spec is not None and change.spec.desired
+    )
 
 
 def test_an_unsynchronized_view_is_never_read_as_an_empty_one(make_static_set: Any) -> None:
-    """Before synchronization the plan does nothing and asks to be re-queued."""
-    resource = make_static_set()
+    """Nothing is created or deleted before the operator has a complete view."""
+    result = run(make_static_set, state=ObservedState(synced=False))
 
-    result = plan(
-        resource,
-        ObservedState(placements=(ack("node-a"),), synced=False, observed_at=NOW),
-        namespace="edge",
-    )
-
-    assert result.workload is None
-    assert result.delete_workload is False
-    assert result.cleanup == ()
+    assert result.probe is None
+    assert result.delete_probes == ()
+    assert result.placements == ()
     assert result.requeue is True
-    assert conditions(result.status)["Synchronized"] == "False"
-    assert conditions(result.status)["Ready"] == "Unknown"
-    assert len(result.status.placements) == 1
+    assert result.status.conditions[0].type == "Synchronized"
+    assert result.status.conditions[0].status == "False"
 
 
-def test_a_running_staticset_applies_the_installer_workload(make_static_set: Any) -> None:
-    """A healthy reconcile keeps the installer workload in place."""
-    resource = make_static_set(spec={"replicas": 2})
-    observed = ObservedState(
-        nodes=(node("node-a"), node("node-b")),
-        installer_pods=(installer("node-a"), installer("node-b", name="pod-b")),
-        observed_at=NOW,
+def test_a_new_generation_starts_a_scheduling_pass(make_static_set: Any) -> None:
+    """The first reconcile asks the scheduler, and creates no placement yet."""
+    result = run(make_static_set)
+
+    assert result.probe is not None
+    assert result.probe[0] == "ReplicaSet"
+    assert result.probe[1]["spec"]["replicas"] == 2
+    assert result.placements == ()
+    assert result.requeue is True
+    assert result.status.placed_generation == 0
+    assert any(item.type == "Scheduling" for item in result.status.conditions)
+
+
+def test_an_incomplete_probe_concludes_nothing(make_static_set: Any) -> None:
+    """A pass whose Pods do not all exist yet must not be read as a decision."""
+    result = run(
+        make_static_set,
+        state=ObservedState(
+            nodes=nodes(),
+            probes=(probe(nodes=("a",), replicas=2),),
+        ),
     )
 
-    result = plan(resource, observed, namespace="edge")
-
-    assert result.workload is not None
-    kind, manifest = result.workload
-    assert kind == "Deployment"
-    assert manifest["spec"]["replicas"] == 2
-    assert result.delete_workload is False
-    assert result.cleanup == ()
-    assert [item.node for item in result.status.placements] == ["node-a", "node-b"]
-    assert all(item.phase is PlacementPhase.PENDING for item in result.status.placements)
-    assert conditions(result.status)["Ready"] == "False"
+    assert result.placements == ()
+    assert result.delete_probes == ()
+    assert result.requeue is True
 
 
-def test_installations_are_acknowledged_per_placement(make_static_set: Any) -> None:
-    """An acknowledged placement is installed and contributes the desired revision."""
-    resource = make_static_set(spec={"replicas": 1})
-    observed = ObservedState(
-        nodes=(node("node-a"),),
-        installer_pods=(installer("node-a"),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
+def test_an_unschedulable_probe_reports_and_changes_nothing(make_static_set: Any) -> None:
+    """A Pod nothing admits is an answer about the cluster, not a reason to remove."""
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(nodes=("a",), unscheduled=1),),
+        placements=(placement("a"),),
+        workloads=(mirror("a"),),
     )
 
-    result = plan(resource, observed, namespace="edge")
+    result = run(make_static_set, state=state)
 
-    placement = result.status.placements[0]
-    assert placement.phase is PlacementPhase.INSTALLED
-    assert placement.acknowledged is True
-    assert result.status.desired_revision == "r-" + "a" * 32
-    assert conditions(result.status)["Ready"] == "True"
+    assert result.placements == ()
+    assert result.delete_probes == ()
+    reason = next(item.reason for item in result.status.conditions if item.type == "Scheduling")
+    assert reason == "Unschedulable"
+
+
+def test_a_complete_probe_writes_one_placement_per_chosen_node(make_static_set: Any) -> None:
+    """The scheduler's answer becomes a placement record for each node it chose."""
+    result = run(
+        make_static_set,
+        state=ObservedState(nodes=nodes(), probes=(probe(),)),
+    )
+
+    assert applied(result) == ["a", "b"]
+    names = {change.name for change in result.placements}
+    assert names == {f"web-{identity('a')}", f"web-{identity('b')}"}
+    # Nothing has been installed yet, so the pass is still running.
+    assert result.delete_probes == ()
+    assert result.requeue is True
+    assert result.status.placed_generation == 0
+
+
+def test_a_placement_that_cannot_be_read_back_is_written_again(make_static_set: Any) -> None:
+    """A record left over from an older generation is updated, not duplicated."""
+    old = placement("a", generation=GENERATION - 1)
+
+    result = run(
+        make_static_set,
+        state=ObservedState(nodes=nodes(), probes=(probe(),), placements=(old,)),
+    )
+
+    assert applied(result) == ["a", "b"]
+    change = next(change for change in result.placements if change.name == old.name)
+    assert change.spec is not None
+    assert change.spec.generation == GENERATION
+
+
+def test_a_concluded_pass_deletes_the_probe_and_records_it(make_static_set: Any) -> None:
+    """The reservation is released once every static Pod is installed and mirrored."""
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(),),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"), mirror("b")),
+    )
+
+    result = run(make_static_set, state=state)
+
+    assert result.delete_probes[0].name == "web-probe-3"
+    assert result.placements == ()
+    assert result.status.placed_generation == GENERATION
+    assert result.requeue is False
+    scheduling = next(item for item in result.status.conditions if item.type == "Scheduling")
+    assert scheduling.reason == "Placed"
+
+
+def test_a_pass_waits_for_the_mirror_pod_before_it_is_concluded(make_static_set: Any) -> None:
+    """Installed but not yet mirrored is not proof that kubelet accepted the manifest."""
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(),),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"),),
+    )
+
+    result = run(make_static_set, state=state)
+
+    assert result.delete_probes == ()
+    assert result.status.placed_generation == 0
+    assert result.requeue is True
+
+
+def test_a_converged_staticset_does_nothing(make_static_set: Any) -> None:
+    """Once a generation is placed and covered, the timer must not start another pass."""
+    state = ObservedState(
+        nodes=nodes(),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"), mirror("b")),
+    )
+
+    result = run(make_static_set, state=state, status={"placedGeneration": GENERATION})
+
+    assert result.probe is None
+    assert result.delete_probes == ()
+    assert result.placements == ()
+    assert result.requeue is False
+
+
+def test_a_shortfall_starts_a_new_pass(make_static_set: Any) -> None:
+    """A placement that disappeared is replaced, as the replica count says."""
+    state = ObservedState(
+        nodes=nodes(),
+        placements=(placement("a"),),
+        workloads=(mirror("a"),),
+    )
+
+    result = run(make_static_set, state=state, status={"placedGeneration": GENERATION})
+
+    assert result.probe is not None
+    assert result.requeue is True
+
+
+def test_a_new_node_starts_a_pass_in_daemonset_mode(make_static_set: Any) -> None:
+    """In DaemonSet mode the expected node set is what detects a node that joined."""
+    state = ObservedState(
+        nodes=nodes(NodeInfo("c")),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"), mirror("b")),
+    )
+
+    result = run(
+        make_static_set,
+        state=state,
+        spec={"mode": "DaemonSet", "replicas": None},
+        status={"placedGeneration": GENERATION},
+    )
+
+    assert result.probe is not None
+    assert result.probe[0] == "DaemonSet"
+
+
+def test_recreate_retires_the_old_probe_before_asking_again(make_static_set: Any) -> None:
+    """Under Recreate the old reservation is released before the new pass is started."""
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(generation=GENERATION - 1),),
+        placements=(placement("a", generation=GENERATION - 1),),
+        workloads=(mirror("a"),),
+    )
+
+    result = run(make_static_set, state=state)
+
+    assert result.probe is None
+    assert [reference.name for reference in result.delete_probes] == ["web-probe-2"]
+    assert result.requeue is True
+    reason = next(item.reason for item in result.status.conditions if item.type == "Scheduling")
+    assert reason == "RetiringPreviousPlacement"
+
+
+def test_surge_does_not_wait_for_the_old_probe_to_go(make_static_set: Any) -> None:
+    """Under Surge the new pass starts in the same reconcile as the old probe's exit.
+
+    Recreate defers the new probe until the old one's Pods are gone, because both
+    would otherwise compete for the same capacity. Surge accepts that overlap, so the
+    only difference the strategy makes at this step is whether the new probe is
+    created now or on the next pass.
+    """
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(generation=GENERATION - 1),),
+        placements=(placement("a", generation=GENERATION - 1),),
+        workloads=(mirror("a"),),
+    )
+
+    result = run(
+        make_static_set, state=state, spec={"update": {"strategy": "Surge", "maxSurge": 1}}
+    )
+
+    assert result.probe is not None
+    assert [reference.name for reference in result.delete_probes] == ["web-probe-2"]
+    assert result.requeue is True
+
+
+def test_a_mode_change_replaces_the_probe_kind(make_static_set: Any) -> None:
+    """A StaticSet switching to DaemonSet must not leave a ReplicaSet behind."""
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(kind="ReplicaSet", generation=GENERATION),),
+    )
+
+    result = run(
+        make_static_set,
+        state=state,
+        spec={
+            "mode": "DaemonSet",
+            "replicas": None,
+            "update": {"strategy": "Surge", "maxSurge": 1},
+        },
+        status={"placedGeneration": 0},
+    )
+
+    assert result.probe is not None
+    assert result.probe[0] == "DaemonSet"
+
+
+def test_a_scaled_down_placement_says_so(make_static_set: Any) -> None:
+    """A placement the new pass did not choose is removed, with the reason recorded."""
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(nodes=("a",)),),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"), mirror("b")),
+    )
+
+    result = run(make_static_set, state=state)
+
+    removal = next(change for change in result.placements if change.name == f"web-{identity('b')}")
+    assert removal.spec is not None
+    assert removal.spec.desired is False
+    assert removal.spec.reason is CleanupReason.SCALED_DOWN
+
+
+def test_a_deselected_daemonset_placement_says_so(make_static_set: Any) -> None:
+    """In DaemonSet mode a node the pass no longer chose was deselected."""
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(kind="DaemonSet", nodes=("a",)),),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"), mirror("b")),
+    )
+
+    result = run(
+        make_static_set,
+        state=state,
+        spec={
+            "mode": "DaemonSet",
+            "replicas": None,
+            "update": {"strategy": "Surge", "maxSurge": 1},
+        },
+    )
+
+    removal = next(change for change in result.placements if change.name == f"web-{identity('b')}")
+    assert removal.spec is not None
+    assert removal.spec.reason is CleanupReason.DESELECTED
+
+
+def test_a_removal_that_finished_deletes_its_placement(make_static_set: Any) -> None:
+    """A placement object is removed only after the node acknowledged the removal."""
+    cleaned = placement(
+        "b", desired=False, phase=PlacementPhase.CLEANED, reason=CleanupReason.SCALED_DOWN
+    )
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(nodes=("a",)),),
+        placements=(placement("a"), cleaned),
+        workloads=(mirror("a"),),
+    )
+
+    result = run(make_static_set, state=state)
+
+    deletes = [change.name for change in result.placements if change.kind == "delete"]
+    assert deletes == [cleaned.name]
+
+
+def test_deletion_removes_every_placement_before_releasing(make_static_set: Any) -> None:
+    """The object keeps its finalizer until each node's manager says the Pod is gone."""
+    resource = make_static_set(
+        metadata={"deletionTimestamp": "2026-10-24T10:00:00+00:00"},
+    )
+    state = ObservedState(
+        nodes=nodes(),
+        probes=(probe(),),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"), mirror("b")),
+    )
+
+    result = plan(resource, state, namespace="edge")
+
+    assert result.probe is None
+    assert [reference.name for reference in result.delete_probes] == ["web-probe-3"]
+    assert {change.spec.reason for change in result.placements if change.spec} == {
+        CleanupReason.RESOURCE_DELETED
+    }
+    assert result.requeue is True
+    cleaned = next(item for item in result.status.conditions if item.type == "CleanedUp")
+    assert cleaned.status == "False"
+
+
+def test_deletion_releases_once_every_placement_is_cleaned(make_static_set: Any) -> None:
+    """Nothing is left to wait for once every record is cleaned and deleted."""
+    resource = make_static_set(metadata={"deletionTimestamp": "2026-10-24T10:00:00+00:00"})
+    state = ObservedState(
+        nodes=nodes(),
+        placements=(
+            placement("a", desired=False, phase=PlacementPhase.CLEANED),
+            placement("b", desired=False, phase=PlacementPhase.CLEANED),
+        ),
+    )
+
+    result = plan(resource, state, namespace="edge")
+
+    assert result.requeue is False
+    assert {change.kind for change in result.placements} == {"delete"}
+    cleaned = next(item for item in result.status.conditions if item.type == "CleanedUp")
+    assert cleaned.status == "True"
+
+
+def test_an_unreachable_node_blocks_a_cleanup_and_says_so(make_static_set: Any) -> None:
+    """The operator never claims a host was cleaned up that it cannot reach."""
+    state = ObservedState(
+        nodes=(NodeInfo("a", ready=True), NodeInfo("b", ready=False)),
+        probes=(probe(nodes=("a",)),),
+        placements=(placement("a"), placement("b", desired=False, phase=PlacementPhase.INSTALLED)),
+        workloads=(mirror("a"),),
+    )
+
+    result = run(make_static_set, state=state)
+
+    record = next(record for record in result.status.cleanup if record.node == "b")
+    assert record.state.value == "Blocked"
+    assert "not Ready" in (record.message or "")
+
+
+def test_the_abandonment_policy_is_reported_but_never_claimed_as_done(
+    make_static_set: Any,
+) -> None:
+    """A force policy changes what is said, never what is known."""
+    state = ObservedState(
+        nodes=(NodeInfo("a"), NodeInfo("b", ready=False)),
+        placements=(placement("a"), placement("b", desired=False, phase=PlacementPhase.INSTALLED)),
+        workloads=(mirror("a"),),
+    )
+
+    result = run(
+        make_static_set,
+        state=state,
+        spec={"cleanup": {"onNodeUnreachable": "AbandonAfterGrace", "abandonmentGraceSeconds": 60}},
+    )
+
+    record = next(record for record in result.status.cleanup if record.node == "b")
+    assert record.acknowledged is False
+    assert "AbandonAfterGrace" in (record.message or "")
+    assert "60s" in (record.message or "")
 
 
 def test_health_is_reported_separately_from_installed_state(make_static_set: Any) -> None:
-    """Observed health never feeds the readiness decision."""
-    resource = make_static_set(spec={"replicas": 1})
-    identity = placement_identity(UID, "node-a")
-    observed = ObservedState(
-        nodes=(node("node-a"),),
-        installer_pods=(installer("node-a"),),
-        placements=(ack("node-a"),),
-        workloads=(
-            ObservedWorkload(
-                name=f"web-{identity}", node="node-a", phase="Running", ready=False, restart_count=4
-            ),
+    """A placement can be installed and unhealthy, or installed and unobservable."""
+    state = ObservedState(
+        nodes=nodes(),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a", ready=False),),
+    )
+
+    result = run(make_static_set, state=state, status={"placedGeneration": GENERATION})
+
+    health = {item.node: item for item in result.status.health}
+    assert health["a"].observed is True
+    assert health["a"].ready is False
+    assert health["b"].observed is False
+    assert {row.phase for row in result.status.placements} == {PlacementPhase.INSTALLED}
+
+
+def test_readiness_needs_every_placement_mirrored_and_acknowledged(make_static_set: Any) -> None:
+    """Readiness is the state of the whole set, not of one placement."""
+    ready_state = ObservedState(
+        nodes=nodes(),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"), mirror("b")),
+    )
+    unmirrored = ObservedState(
+        nodes=nodes(),
+        placements=(placement("a"), placement("b")),
+        workloads=(mirror("a"),),
+    )
+
+    ready = run(make_static_set, state=ready_state, status={"placedGeneration": GENERATION})
+    not_ready = run(make_static_set, state=unmirrored, status={"placedGeneration": GENERATION})
+
+    assert next(item for item in ready.status.conditions if item.type == "Ready").status == "True"
+    assert (
+        next(item for item in not_ready.status.conditions if item.type == "Ready").status == "False"
+    )
+
+
+def test_a_rollout_reports_no_single_desired_revision(make_static_set: Any) -> None:
+    """Two revisions are two content hashes: there is no honest "newest" to report."""
+    state = ObservedState(
+        nodes=nodes(),
+        placements=(
+            placement("a", revision="r-11111111111111111111111111111111"),
+            placement("b", revision="r-22222222222222222222222222222222"),
         ),
-        observed_at=NOW,
+        workloads=(mirror("a"), mirror("b")),
     )
 
-    result = plan(resource, observed, namespace="edge")
+    result = run(make_static_set, state=state, status={"placedGeneration": GENERATION})
 
-    health = result.status.health[0]
-    assert health.observed is True
-    assert health.ready is False
-    assert health.restart_count == 4
-    assert result.status.placements[0].phase is PlacementPhase.INSTALLED
-    assert conditions(result.status)["Ready"] == "True"
+    assert result.status.desired_revision is None
 
 
-def test_an_unobserved_workload_is_reported_as_such(make_static_set: Any) -> None:
-    """A placement with no mirror Pod yet is not a failed placement."""
-    resource = make_static_set(spec={"replicas": 1})
-    observed = ObservedState(
-        nodes=(node("node-a"),),
-        installer_pods=(installer("node-a"),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
+def test_a_failed_placement_degrades_the_set(make_static_set: Any) -> None:
+    """A refusal is surfaced instead of being hidden behind "not ready yet"."""
+    state = ObservedState(
+        nodes=nodes(),
+        placements=(placement("a", phase=PlacementPhase.FAILED, acknowledged=False),),
     )
 
-    result = plan(resource, observed, namespace="edge")
+    result = run(make_static_set, state=state)
 
-    assert result.status.health[0].observed is False
-    assert "mirror Pod" in (result.status.health[0].message or "")
+    degraded = [item for item in result.status.conditions if item.type == "Degraded"]
+    assert degraded and degraded[0].status == "True"
 
 
-def test_an_orphaned_placement_gets_an_intent_and_a_cleanup_worker(make_static_set: Any) -> None:
-    """A placement no installer serves is cleaned up by a pinned worker."""
-    resource = make_static_set(spec={"replicas": 1})
-    observed = ObservedState(
-        nodes=(node("node-a"),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
+def test_a_placement_write_carries_the_cleanup_policy(make_static_set: Any) -> None:
+    """``removeConfigurationAfterAck`` is copied, because cleanup may outlive the set."""
+    result = run(
+        make_static_set,
+        state=ObservedState(nodes=nodes(), probes=(probe(),)),
+        spec={"cleanup": {"removeConfigurationAfterAck": False}},
     )
 
-    result = plan(resource, observed, namespace="edge")
-
-    assert len(result.cleanup) == 1
-    action = result.cleanup[0]
-    assert action.record.state is CleanupState.QUEUED
-    assert action.record.acknowledged is False
-    assert action.worker is not None
-    assert action.payload["cleanup"] == "true"
-    assert action.payload["generation"] == "3"
-    assert result.requeue is True
-    assert conditions(result.status)["CleanupPending"] == "True"
-
-
-def test_an_unreachable_node_retains_cleanup_and_says_so(make_static_set: Any) -> None:
-    """A not-Ready node is not chased with a worker that could not run there."""
-    resource = make_static_set(spec={"replicas": 1})
-    observed = ObservedState(
-        nodes=(node("node-a", ready=False),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    action = result.cleanup[0]
-    assert action.record.state is CleanupState.BLOCKED
-    assert action.worker is None
-    assert "not Ready" in (action.record.message or "")
-    assert "Retain" in (action.record.message or "")
-
-
-def test_the_abandonment_policy_is_reported_but_never_claimed_as_done(make_static_set: Any) -> None:
-    """The force policy is explained in status without claiming remote success."""
-    resource = make_static_set(
-        spec={
-            "replicas": 1,
-            "cleanup": {"onNodeUnreachable": "AbandonAfterGrace", "abandonmentGraceSeconds": 60},
-        }
-    )
-    observed = ObservedState(
-        nodes=(node("node-a", ready=False),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    action = result.cleanup[0]
-    assert action.record.acknowledged is False
-    assert action.record.state is CleanupState.BLOCKED
-    assert "AbandonAfterGrace" in (action.record.message or "")
-    assert "60s" in (action.record.message or "")
-
-
-def test_a_scaled_down_placement_is_attributed_to_the_scale_down(make_static_set: Any) -> None:
-    """Scaling in explains why a placement is being removed."""
-    resource = make_static_set(spec={"replicas": 2})
-    observed = ObservedState(
-        nodes=(node("node-a"), node("node-b")),
-        installer_pods=(installer("node-a"),),
-        placements=(ack("node-b"),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    assert result.cleanup[0].record.reason.value == "ScaledDown"
-
-
-def test_a_deselected_node_is_attributed_to_deselection(make_static_set: Any) -> None:
-    """A DaemonSet whose node selector changed attributes removal to deselection."""
-    resource = make_static_set(
-        spec={
-            "mode": "DaemonSet",
-            "replicas": None,
-            "placement": {"nodeSelector": {"role": "core"}},
-        }
-    )
-    observed = ObservedState(
-        nodes=(NodeInfo(name="node-a", labels={"role": "edge"}),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    assert result.cleanup[0].record.reason.value == "Deselected"
-
-
-def test_deletion_cleans_up_every_placement_before_releasing(make_static_set: Any) -> None:
-    """A deleted StaticSet removes its workload and waits for acknowledgments."""
-    resource = make_static_set(
-        spec={"replicas": 1}, metadata={"deletionTimestamp": "2026-10-12T11:00:00Z"}
-    )
-    observed = ObservedState(
-        nodes=(node("node-a"),),
-        installer_pods=(installer("node-a"),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    assert result.delete_workload is True
-    assert result.workload is None
-    assert len(result.cleanup) == 1
-    assert result.cleanup[0].record.reason.value == "ResourceDeleted"
-    assert result.cleanup[0].worker is None
-    assert result.requeue is True
-    assert conditions(result.status)["Deleting"] == "True"
-    assert conditions(result.status)["CleanedUp"] == "False"
-
-
-def test_deletion_acknowledged_releases_the_finalizer(make_static_set: Any) -> None:
-    """Once every placement acknowledges, the plan stops asking to be re-queued."""
-    resource = make_static_set(
-        spec={"replicas": 1}, metadata={"deletionTimestamp": "2026-10-12T11:00:00Z"}
-    )
-    observed = ObservedState(
-        nodes=(node("node-a"),),
-        placements=(ack("node-a", state="Removed", revision=""),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    assert result.requeue is False
-    assert conditions(result.status)["CleanedUp"] == "True"
-    assert result.status.cleanup[0].acknowledged is True
-
-
-def test_a_terminating_installer_makes_its_placement_a_cleanup_candidate(
-    make_static_set: Any,
-) -> None:
-    """An installer that is going away no longer serves its node."""
-    resource = make_static_set(spec={"replicas": 1})
-    observed = ObservedState(
-        nodes=(node("node-a"),),
-        installer_pods=(installer("node-a", deleting=True),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    assert len(result.cleanup) == 1
-    assert result.status.placements == []
-
-
-def test_a_removed_placement_is_not_cleaned_up_twice(make_static_set: Any) -> None:
-    """An already-removed placement is left alone."""
-    resource = make_static_set(spec={"replicas": 1})
-    observed = ObservedState(
-        nodes=(node("node-a"),),
-        placements=(ack("node-a", state="Removed", revision=""),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    assert result.cleanup == ()
-    assert result.requeue is False
-
-
-def test_cleanup_worker_is_pinned_and_narrow(make_static_set: Any) -> None:
-    """The cleanup worker mounts the two directories and nothing else."""
-    resource = make_static_set()
-
-    worker = cleanup_worker_pod(
-        resource,
-        namespace="edge",
-        identity="id1",
-        node="node-a",
-        generation=3,
-        reason="ScaledDown",
-        pod_name="web-id1",
-    )
-
-    assert worker["spec"]["nodeName"] == "node-a"
-    assert worker["spec"]["restartPolicy"] == "Never"
-    assert worker["metadata"]["finalizers"] == ["staticsets.cloudlane.dev/cleanup"]
-    assert worker["metadata"]["annotations"]["staticsets.cloudlane.dev/cleanup-reason"] == (
-        "ScaledDown"
-    )
-    assert worker["spec"]["volumes"][1]["hostPath"]["path"] == "/var/lib/static-sets"
-    container = worker["spec"]["containers"][0]
-    assert container["command"] == ["static-set-installer", "cleanup"]
-    assert container["securityContext"]["privileged"] is False
-    environment = {item["name"]: item["value"] for item in container["env"]}
-    assert environment["STATIC_SETS_PLACEMENT"] == "id1"
-    assert environment["STATIC_SETS_POD_NAME"] == "web-id1"
-
-
-def test_installers_running_condition_reflects_the_live_count(make_static_set: Any) -> None:
-    """The installer count is visible without reading the Deployment."""
-    resource = make_static_set(spec={"replicas": 2})
-    observed = ObservedState(
-        nodes=(node("node-a"), node("node-b")),
-        installer_pods=(installer("node-a"),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    condition = next(item for item in result.status.conditions if item.type == "InstallersRunning")
-    assert condition.status == "True"
-    assert "1 installer" in condition.message
-
-
-def test_daemonset_readiness_counts_eligible_nodes(make_static_set: Any) -> None:
-    """DaemonSet readiness is measured against the nodes the selector admits."""
-    resource = make_static_set(
-        spec={
-            "mode": "DaemonSet",
-            "replicas": None,
-            "placement": {"nodeSelector": {"role": "edge"}},
-        }
-    )
-    observed = ObservedState(
-        nodes=(node("node-a"), node("node-b"), NodeInfo(name="node-c", labels={"role": "core"})),
-        installer_pods=(installer("node-a"),),
-        placements=(ack("node-a"),),
-        observed_at=NOW,
-    )
-
-    result = plan(resource, observed, namespace="edge")
-
-    assert conditions(result.status)["Ready"] == "False"
-    ready_condition = next(item for item in result.status.conditions if item.type == "Ready")
-    assert "1 of 2" in ready_condition.message
-
-
-@pytest.mark.parametrize("mode", ["Deployment", "DaemonSet"])
-def test_both_modes_apply_a_workload(make_static_set: Any, mode: str) -> None:
-    """Both supported modes produce an installer workload."""
-    resource = make_static_set(spec={"mode": mode, "replicas": 1 if mode == "Deployment" else None})
-
-    result = plan(resource, ObservedState(observed_at=NOW), namespace="edge")
-
-    assert result.workload is not None
-    assert result.workload[0] == mode
-
-
-def test_a_cleanup_worker_runs_as_the_same_account_as_the_installer(
-    make_static_set: Any, monkeypatch: Any
-) -> None:
-    """The worker writes the same directories, so it needs the same permissions.
-
-    Both names come from the environment the chart sets, which is what keeps them
-    from drifting apart — a worker naming an account that does not exist would never
-    start, and the placement would never be cleaned up.
-    """
-    monkeypatch.setenv(INSTALLER_SERVICE_ACCOUNT_ENV, "custom-installer")
-    resource = make_static_set(spec={"replicas": 1})
-
-    worker = cleanup_worker_pod(
-        resource,
-        namespace="edge",
-        identity="abcdef0123",
-        node="worker-1",
-        generation=3,
-        reason="ScaleDown",
-        pod_name="web-abcdef0123",
-    )
-
-    assert worker["spec"]["serviceAccountName"] == "custom-installer"
+    change: PlacementChange = result.placements[0]
+    assert change.spec is not None
+    assert change.spec.remove_configuration is False

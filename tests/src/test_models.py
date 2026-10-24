@@ -10,13 +10,15 @@ from pydantic import ValidationError
 
 from static_sets.errors import DefinitionError
 from static_sets.models import (
+    CleanupReason,
     ImageProvisioning,
-    InstallerSpec,
     Mode,
     NodeUnreachablePolicy,
+    PlacementPhase,
     StaticSet,
     UpdateStrategy,
 )
+from static_sets.placements import PlacementSpec, StaticPodPlacement
 
 
 def test_crd_is_structurally_valid_and_namespaced() -> None:
@@ -41,7 +43,6 @@ def test_crd_schema_uses_wire_names_and_constraints() -> None:
 
     assert sorted(spec["properties"]) == [
         "cleanup",
-        "installer",
         "mode",
         "offline",
         "placement",
@@ -52,8 +53,10 @@ def test_crd_schema_uses_wire_names_and_constraints() -> None:
     ]
     assert spec["properties"]["mode"]["enum"] == ["Deployment", "DaemonSet"]
     assert spec["properties"]["replicas"]["maximum"] == 64
-    installer = spec["properties"]["installer"]
-    assert installer["properties"]["staticPodPath"]["default"] == "/etc/kubernetes/manifests"
+    runtime_class = spec["properties"]["template"]["properties"]["spec"]["properties"][
+        "runtimeClassName"
+    ]
+    assert runtime_class["maxLength"] == 63
 
 
 def test_status_schema_separates_installed_state_from_health() -> None:
@@ -76,8 +79,6 @@ def test_minimal_spec_applies_documented_defaults(make_static_set: Any) -> None:
     assert resource.spec.cleanup.on_node_unreachable is NodeUnreachablePolicy.RETAIN
     assert resource.spec.policy.allow_privileged is False
     assert resource.spec.policy.allow_inline_secret_env is False
-    assert resource.spec.installer.static_pod_path == "/etc/kubernetes/manifests"
-    assert resource.spec.installer.bundle_dir == "/var/lib/static-sets"
 
 
 def test_replicas_required_for_deployment_mode(make_resource: Any) -> None:
@@ -127,35 +128,55 @@ def test_unknown_spec_field_is_rejected(make_resource: Any) -> None:
         StaticSet.model_validate(body)
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("static_pod_path", "etc/kubernetes/manifests"),
-        ("bundle_dir", "var/lib/static-sets"),
-    ],
-)
-def test_installer_paths_must_be_absolute(field: str, value: str) -> None:
-    """A relative host path is refused."""
+def test_the_placement_record_is_its_own_namespaced_resource() -> None:
+    """The placement record has the identity, scope and status subresource it needs."""
+    manifest = bk.crd_manifest(StaticPodPlacement)
+    spec = manifest["spec"]
+
+    assert spec["group"] == "staticsets.cloudlane.dev"
+    assert spec["scope"] == "Namespaced"
+    assert spec["names"]["kind"] == "StaticPodPlacement"
+    assert spec["names"]["plural"] == "staticpodplacements"
+    assert spec["names"]["shortNames"] == ["spp"]
+    assert spec["versions"][0]["subresources"] == {"status": {}}
+
+
+def test_a_removal_must_say_why() -> None:
+    """An undesired placement without a reason is refused."""
     with pytest.raises(ValidationError) as error:
-        InstallerSpec.model_validate({"image": "img", field: value})
-
-    assert "must be an absolute path" in str(error.value)
-
-
-@pytest.mark.parametrize(
-    ("static_pod_path", "bundle_dir"),
-    [
-        ("/etc/kubernetes/manifests", "/etc/kubernetes/manifests"),
-        ("/etc/kubernetes/manifests", "/etc/kubernetes/manifests/tmp"),
-        ("/etc/kubernetes", "/etc/kubernetes/manifests"),
-    ],
-)
-def test_installer_paths_must_be_disjoint(static_pod_path: str, bundle_dir: str) -> None:
-    """The bundle must not live inside, or contain, kubelet's watched directory."""
-    with pytest.raises(ValidationError):
-        InstallerSpec.model_validate(
-            {"image": "img", "staticPodPath": static_pod_path, "bundleDir": bundle_dir}
+        PlacementSpec(
+            static_set="web",
+            static_set_uid="uid",
+            node="worker-1",
+            generation=1,
+            desired=False,
         )
+
+    assert "spec.reason is required" in str(error.value)
+
+
+def test_a_desired_placement_carries_no_removal_reason() -> None:
+    """A wanted placement cannot carry a cleanup reason, which would be a contradiction."""
+    with pytest.raises(ValidationError) as error:
+        PlacementSpec(
+            static_set="web",
+            static_set_uid="uid",
+            node="worker-1",
+            generation=1,
+            desired=True,
+            reason=CleanupReason.SCALED_DOWN,
+        )
+
+    assert "only valid when spec.desired is false" in str(error.value)
+
+
+def test_a_placement_record_defaults_to_a_pending_state() -> None:
+    """A record the manager has not reported on yet reads as pending, not as installed."""
+    spec = PlacementSpec(static_set="web", static_set_uid="uid", node="worker-1", generation=2)
+
+    assert spec.desired is True
+    assert spec.remove_configuration is True
+    assert PlacementPhase.PENDING.value == "Pending"
 
 
 def test_definition_error_is_a_library_error() -> None:

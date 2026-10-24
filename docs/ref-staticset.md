@@ -18,27 +18,32 @@ stored as `v1`. The CRD is generated from the Pydantic models
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `mode` | `Deployment` \| `DaemonSet` | — | How installers are created and placed. |
-| `replicas` | integer 0–64 | — | Desired installer placements. Required for `Deployment`, invalid for `DaemonSet`. |
+| `mode` | `Deployment` \| `DaemonSet` | — | How many placements the scheduler is asked for, and by what kind of probe. |
+| `replicas` | integer 0–64 | — | Desired placements. Required for `Deployment`, invalid for `DaemonSet`. |
 | `template` | `PodTemplateSpec` | — | The workload. Restricted to the [supported subset](./ref-translation.md). |
-| `placement` | `Placement` | `{}` | Scheduler placement for the *installers*. |
+| `placement` | `Placement` | `{}` | Scheduler placement for the *scheduling probe*, and therefore for the workload. |
 | `update` | `UpdatePolicy` | see below | How a new revision replaces an old placement. |
 | `offline` | `OfflinePolicy` | see below | What must hold before a revision may be published. |
 | `cleanup` | `CleanupPolicy` | see below | How unwanted placements are removed. |
 | `policy` | `WorkloadPolicy` | see below | Guards on the static workload itself. |
-| `installer` | `InstallerSpec` | — required | The installer image and the host paths it may touch. |
+
+There is no `installer` field: where a static Pod is written is a property of the node,
+not of a StaticSet. The chart configures the manager once per node
+(`manager.staticPodPath`, `manager.bundleDir`), which is what stops a StaticSet from
+widening the host access of the process that writes it.
 
 ### `spec.placement`
 
-Steers the Kubernetes scheduler, which places installer Pods. **Not** copied onto the
-emitted static Pod; see [placement and capacity](./about-placement-and-capacity.md).
+Steers the Kubernetes scheduler, which places the scheduling probe's Pods. Copied onto
+the probe, never onto the emitted static Pod; see
+[placement and capacity](./about-placement-and-capacity.md).
 
 | Field | Meaning |
 | --- | --- |
 | `nodeSelector` | Label equality requirements. |
 | `affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution` | Required node selector terms (`matchExpressions`, `matchFields`). |
 | `affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution` | Weighted preferred terms. |
-| `tolerations` | Tolerations installers carry. |
+| `tolerations` | Tolerations the workload's placement requires. |
 | `topologySpreadConstraints` | The upstream `V1TopologySpreadConstraint`: `maxSkew`, `topologyKey`, `whenUnsatisfiable` (default `DoNotSchedule`), `labelSelector`, `minDomains`, and the pass-through `matchLabelKeys`/`nodeAffinityPolicy`/`nodeTaintsPolicy`. |
 
 The field types are the generated Kubernetes client models, so the CRD documents the
@@ -79,25 +84,28 @@ outside the API server's set, and a preferred-term weight outside 1–100.
 | `allowPrivileged` | `false` | Permit `securityContext.privileged` in the workload. A static Pod is started by kubelet straight from a file, so nothing else reviews it. |
 | `allowInlineSecretEnv` | `false` | Permit Secret material to be written into the static Pod manifest as an environment value. See [Secret handling](./ref-translation.md#secrets). |
 
-### `spec.installer`
+### `spec.template.spec.runtimeClassName`
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `image` | — required | The installer image. Not the target application. |
-| `imagePullPolicy` | `IfNotPresent` | Pull policy for the installer container. |
-| `staticPodPath` | `/etc/kubernetes/manifests` | kubelet's `staticPodPath`. Must match the node's kubelet configuration; the operator never edits kubelet configuration. The directory must already exist on the node: the installer mounts it as a `Directory`, not a `DirectoryOrCreate`, so a path kubelet cannot be watching fails loudly at mount time instead of being invented. |
-| `bundleDir` | `/var/lib/static-sets` | The persistent directory the installer owns. Must be disjoint from `staticPodPath`, because kubelet watches that directory and would try to start a temporary file. |
-| `resources` | unset | Overrides the installer's small fixed reservation. See [capacity](./about-placement-and-capacity.md#resource-accounting-is-a-deliberate-trade-off). |
+Optional, and passed through to the static Pod's manifest. It is the one
+API-adjacent Pod field a static Pod can keep, because kubelet resolves it through its
+own cache rather than through a scheduler. Note the cost: a `RuntimeClass` is an API
+object, so a workload that declares one is not guaranteed to start on a reboot that
+happens while the API server is unreachable. Leave it unset for a workload whose point
+is to come back disconnected. The value must fit a label value (≤63 characters), because
+it is also carried on the scheduling probe's
+`staticsets.cloudlane.dev/runtime-class` label — the probe itself must run under a
+placeholder class that no node can start.
 
 ## `status`
 
 | Field | Meaning |
 | --- | --- |
 | `observedGeneration` | The `metadata.generation` this status describes. |
-| `desiredRevision` | The newest revision any placement reports as installed. |
-| `placements[]` | What each installer **did**: `identity`, `node`, `revision`, `phase` (`Pending`, `Installed`, `Cleaning`, `Cleaned`, `Failed`), `acknowledged`, `generation`, `message`. |
+| `placedGeneration` | The generation a complete scheduling pass has been carried out for. A pass is only started when this lags behind, when a placement is missing, or when a new eligible node appears. |
+| `desiredRevision` | The revision every installed placement agrees on, or unset while a rollout has two revisions in flight — revisions are content hashes, so there is no honest "newest" to report. |
+| `placements[]` | What each node's manager **did**: `identity`, `node`, `revision`, `phase` (`Pending`, `Installing`, `Installed`, `Retiring`, `Cleaning`, `Cleaned`, `Failed`), `acknowledged`, `generation`, `message`. |
 | `health[]` | What was **observed**: `identity`, `node`, `observed`, `phase`, `ready`, `restartCount`, `message`, derived from the mirror Pods. |
-| `cleanup[]` | Each cleanup intent: `identity`, `node`, `revision`, `generation`, `reason`, `state` (`Requested`, `Queued`, `Acknowledged`, `Blocked`, `Abandoned`), `acknowledged`, `message`. |
+| `cleanup[]` | Each cleanup intent: `identity`, `node`, `revision`, `generation`, `reason`, `state` (`Requested`, `Acknowledged`, `Blocked`, `Abandoned`), `acknowledged`, `message`. |
 | `conditions[]` | Standard Kubernetes conditions, listed below. |
 
 Installed state is deliberately separate from observed health. A placement can be
@@ -109,9 +117,9 @@ neither is a reason to reinstall.
 | Type | Status | Reason | Meaning |
 | --- | --- | --- | --- |
 | `Synchronized` | `True` when the operator's view of the cluster is complete; `False` with reason `Synchronizing` before that. | `Synchronized`, `Synchronizing` | Until this is `True` the operator performs no destructive action. |
-| `Ready` | `True` when every desired placement is installed and acknowledged. | `AllPlacementsInstalled`, `PlacementsPending`, `Deleting` | |
+| `Ready` | `True` when every desired placement is installed, acknowledged and mirrored. | `AllPlacementsInstalled`, `PlacementsPending`, `Deleting` | |
 | `CleanupPending` | `True` while any cleanup intent is unacknowledged. | `CleanupPending`, `CleanupComplete` | |
-| `InstallersRunning` | `True` while at least one installer serves a placement. | `InstallersLive`, `NoInstallers` | |
+| `Scheduling` | `True` while a scheduling pass is in progress. | `ProbeCreated`, `ProbePending`, `Unschedulable`, `Installing`, `RetiringPreviousPlacement`, `Placed` | |
 | `Degraded` | `True` when a placement reported a failure. | `PlacementFailed` | |
 | `Deleting` | `True` while a deleted StaticSet is cleaning up. | `ResourceDeleted` | |
 | `CleanedUp` | `True` once every placement acknowledged removal. The finalizer is released at that point. | `CleanupAcknowledged`, `CleanupPending` | |

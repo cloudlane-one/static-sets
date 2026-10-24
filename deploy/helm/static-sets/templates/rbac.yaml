@@ -1,6 +1,5 @@
 {{- if .Values.rbac.create }}
 {{- $fullname := include "static-sets.fullname" . }}
-{{- $namespace := include "static-sets.watchNamespace" . }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -9,139 +8,110 @@ metadata:
   labels:
     {{- include "static-sets.labels" . | nindent 4 }}
 ---
-# The installer identity. Installer Pods run as this account, in the namespace the
-# operator watches, and it is deliberately narrower than the controller's: it may
-# read the StaticSet it serves, read the configuration that StaticSet references,
-# write its own acknowledgment, and release its own finalizer.
+# The manager identity. One Pod per node runs as this account, in the chart's
+# namespace, and serves StaticSets from every namespace. It is deliberately narrower
+# than the controller's: it may read the StaticSets and the configuration they
+# reference, read the Pods it needs to observe, and write the status of the placement
+# records that name its node.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "static-sets.installerServiceAccountName" . }}
+  name: {{ include "static-sets.managerServiceAccountName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "static-sets.labels" . | nindent 4 }}
 ---
+# The controller. Cluster-scoped because a StaticSet may live in any namespace.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {{ $fullname }}-installer
-  namespace: {{ $namespace }}
-  labels:
-    {{- include "static-sets.labels" . | nindent 4 }}
-rules:
-  - apiGroups: ["staticsets.cloudlane.dev"]
-    resources: [staticsets]
-    verbs: [get, list, watch]
-  - apiGroups: [""]
-    resources: [configmaps]
-    verbs: [get, list, create, update, patch]
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get, list]
-  # An installer holds a finalizer while it owns local state and clears it when it
-  # is done; a cleanup worker deletes itself the same way. That is the only reason
-  # this account may touch Pods at all.
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get, patch, delete]
-  # Progress and refusals are reported as events.
-  - apiGroups: [""]
-    resources: [events]
-    verbs: [create, patch]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ $fullname }}-installer
-  namespace: {{ $namespace }}
-  labels:
-    {{- include "static-sets.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ $fullname }}-installer
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "static-sets.installerServiceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: {{ $fullname }}-controller
-  namespace: {{ $namespace }}
   labels:
     {{- include "static-sets.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["staticsets.cloudlane.dev"]
     resources: [staticsets, staticsets/status, staticsets/finalizers]
     verbs: [get, list, watch, create, update, patch, delete]
-  # The installer workload the operator owns.
+  # The placement records: the controller writes their spec, and reads back the status
+  # each node's manager publishes. Deleting one is how a finished cleanup is closed.
+  - apiGroups: ["staticsets.cloudlane.dev"]
+    resources: [staticpodplacements, staticpodplacements/status]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # The scheduling probes. A ReplicaSet or a DaemonSet is created to ask the scheduler
+  # where a workload should run, and deleted as soon as the answer is installed.
   - apiGroups: ["apps"]
-    resources: [deployments, daemonsets]
+    resources: [replicasets, daemonsets]
     verbs: [get, list, watch, create, update, patch, delete]
-  # Installer Pods and the cleanup workers that replace them, the placement
-  # objects installers acknowledge through, and mirror-Pod observation.
+  # Probe Pods and mirror Pods are read to learn which nodes the scheduler chose and
+  # whether kubelet accepted the manifests.
   - apiGroups: [""]
-    resources: [pods, configmaps]
-    verbs: [get, list, watch, create, update, patch, delete]
-  # Reading referenced configuration is the operator's job only in the sense that
-  # it may need to report what it could not read; it never copies Secret data.
-  - apiGroups: [""]
-    resources: [secrets]
+    resources: [pods]
     verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ $fullname }}-controller
-  namespace: {{ $namespace }}
-  labels:
-    {{- include "static-sets.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ $fullname }}-controller
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "static-sets.serviceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
----
-# kopf manages one watch per namespace and starts and stops them as namespaces appear
-# and disappear, so it has to be able to read them. This is the framework's own
-# requirement — it is the same rule the based-operators chart ships — and it is the
-# reason the operator is not purely namespaced.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ $fullname }}-namespace-reader
-  labels:
-    {{- include "static-sets.labels" . | nindent 4 }}
-rules:
-  - apiGroups: [""]
-    resources: [namespaces]
-    verbs: [get, list, watch]
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $fullname }}-namespace-reader
+  name: {{ $fullname }}-controller
   labels:
     {{- include "static-sets.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $fullname }}-namespace-reader
+  name: {{ $fullname }}-controller
 subjects:
   - kind: ServiceAccount
     name: {{ include "static-sets.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
-# Nodes are cluster-scoped too: placement and reachability reporting need this read,
-# and nothing else about a node.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-manager
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["staticsets.cloudlane.dev"]
+    resources: [staticsets]
+    verbs: [get, list, watch]
+  # The manager holds a finalizer on the placements it serves, and reports what it
+  # did in their status. It never writes the spec: where a placement goes is the
+  # controller's decision.
+  - apiGroups: ["staticsets.cloudlane.dev"]
+    resources: [staticpodplacements, staticpodplacements/status, staticpodplacements/finalizers]
+    verbs: [get, list, watch, update, patch]
+  # Reading the configuration a template references is the manager's whole job; it
+  # copies that content onto the node at install time.
+  - apiGroups: [""]
+    resources: [configmaps, secrets]
+    verbs: [get, list, watch]
+  # Mirror Pods are the proof that kubelet accepted a manifest.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-manager
+  labels:
+    {{- include "static-sets.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "static-sets.managerServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Nodes are cluster-scoped: placement expectations and reachability reporting need
+# this read, and nothing else about a node.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -152,6 +122,12 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+  # kopf manages one watch per namespace and starts and stops them as namespaces
+  # appear and disappear, so both processes have to be able to read them. This is the
+  # framework's own requirement, and it is why the operator is not namespaced.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -166,6 +142,9 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "static-sets.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: {{ include "static-sets.managerServiceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- if .Values.webhook.enabled }}
 ---

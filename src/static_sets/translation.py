@@ -78,6 +78,7 @@ _POD_SPEC_SCALARS = (
     ("host_ipc", "hostIPC"),
     ("hostname", "hostname"),
     ("share_process_namespace", "shareProcessNamespace"),
+    ("runtime_class_name", "runtimeClassName"),
 )
 
 _POD_SPEC_MODELS = (

@@ -60,7 +60,7 @@ They skip by default and are opt-in, because they build images or drive clusters
 | Command | Needs |
 | --- | --- |
 | `STATIC_SETS_IMAGE_SMOKE=1 uv run pytest tests/test_image_smoke.py -v` | A Docker daemon. Builds `deploy/Dockerfile` and runs both entry points inside the image. |
-| `STATIC_SETS_K8S_INTEGRATION=1 uv run pytest tests/test_e2e.py -v` | A reachable cluster, plus `docker`, `helm` and (for kind) `kind`. Installs the chart, creates a StaticSet, checks the manifest the installer wrote on the node, and deletes the StaticSet to exercise the cleanup protocol. |
+| `STATIC_SETS_K8S_INTEGRATION=1 uv run pytest tests/test_e2e.py -v` | A reachable cluster, plus `docker`, `helm` and (for kind) `kind`. Installs the chart, creates a StaticSet, waits for the manifest the node manager wrote and for kubelet's mirror Pod, and deletes the StaticSet to exercise the cleanup protocol. |
 
 The end-to-end suite points `staticPodPath` at a directory kubelet does not watch, so it
 is safe on a kind cluster whose control plane is itself static Pods. What it therefore

@@ -8,14 +8,14 @@ implemented, so that nothing has to be discovered by reading the source.
 | Item | Status |
 | --- | --- |
 | **Reboot recovery** | Not verified in CI. The end-to-end suite proves the operator compiles the workload, materializes its configuration, writes the manifest to the configured directory, acknowledges it, and removes it again on cleanup, against a real cluster. Whether a rebooted kubelet then *starts* that manifest is verified by the manual procedure in [How to verify the disconnected reboot guarantee](./how-to-verify-disconnected-reboot.md). No automated test in this repository has observed a host reboot. |
-| **Air-gapped image preparation** | `spec.offline.imageProvisioning: VerifiedBeforeInstall` refuses to publish a revision until a checker confirms the images are present, but no checker is shipped: `reconcile(..., image_checker=...)` is a seam, and the installer command supplies none. The default policy (`ExternallyProvisioned`) reports that image availability is somebody else's responsibility. |
+| **Air-gapped image preparation** | `spec.offline.imageProvisioning: VerifiedBeforeInstall` refuses to publish a revision until a checker confirms the images are present, but no checker is shipped: `reconcile(..., image_checker=...)` is a seam, and the manager supplies none. The default policy (`ExternallyProvisioned`) reports that image availability is somebody else's responsibility. |
 | **Real registry / disconnected registry behaviour** | Not exercised. Pull policies are validated (`Always` is refused unless the policy accepts it) but no test pulls from a registry or fails to. |
 
 ## Accepted but not acted on
 
 | Field | Status |
 | --- | --- |
-| `spec.update.gracePeriodSeconds` | Validated, carried, and **not used to bound retirement**. A placement is retired when its installer is gone, not when a timer expires. |
+| `spec.update.gracePeriodSeconds` | Validated, carried, and **not used to bound retirement**. A placement is retired when its node's manager removes the manifest, not when a timer expires. |
 
 ## Deliberately not supported
 
@@ -45,15 +45,15 @@ trade-off is visible rather than surprising. Each is also in the
 
 | Item | Consequence |
 | --- | --- |
-| **The installer runs as root.** kubelet's manifest directory is root-owned, so writing there needs it. Pod Security Admission in a `restricted` namespace will refuse the installer Pod; use a namespace with a policy that permits it, or a node-local kubelet configuration that lets a different user write the path. |
+| **The manager runs as root.** kubelet's manifest directory is root-owned, so writing there needs it. Pod Security Admission in a `restricted` namespace will refuse the manager Pod; install the chart into a namespace with a policy that permits it, or use a node-local kubelet configuration that lets a different user write the path. |
 | **Static Pods bypass admission entirely.** A manifest file is not an API object. `spec.policy.allowPrivileged` and the webhook are the only guards this operator offers; nothing else in the cluster will see the workload. |
-| **Placement cannot see workload capacity.** The installer reserves its own small resources, so the scheduler does not know how much the static Pod will need. Pin StaticSets to node classes with `spec.placement` if that matters; see [capacity](./about-placement-and-capacity.md#resource-accounting-is-a-deliberate-trade-off). |
-| **Fencing is eventually consistent.** A node keeps running its workload until its own installer (or a cleanup worker on that node) removes the manifest. An unreachable node keeps it indefinitely unless `AbandonAfterGrace` is set, and even then the operator only stops tracking it. |
-| **Placement acknowledgment uses ConfigMaps.** An installer reports through a ConfigMap in the StaticSet's namespace rather than a dedicated resource. It works, it is namespaced, and it needs no extra CRD, but a dedicated type would carry a schema and could not be confused with the user's own ConfigMaps. |
-| **One namespace per operator.** The controller watches a single namespace so that its permissions can stay namespaced — the only cluster-scoped reads are `nodes` and the `namespaces` kopf requires. Managing StaticSets across namespaces means running the chart once per namespace, or widening the RBAC and switching to `--all-namespaces`. |
-| **Drift is repaired on an interval, not immediately.** An installer rewrites a manifest that no longer matches the revision it rendered, and it reconciles every `--interval` seconds (30 by default), so a manifest edited on the node is corrected on the next pass rather than the instant it changes. There is no watch, and no alert: the repair is visible only as the file changing back. |
-| **One installer ServiceAccount per namespace.** Every installer in a namespace runs as the same account, so it may read every ConfigMap and Secret that any StaticSet there references. Narrowing that to an account per StaticSet needs the operator to create ServiceAccounts, Roles and RoleBindings, which widens the controller's own permissions; the chart's `installer.serviceAccountName` is the escape hatch until then. |
-| **Orphaned placement objects.** A ConfigMap that recorded a placement is not garbage-collected after the StaticSet is gone; removing the namespace removes it. Cleaning them up needs a controller that does not exist yet. |
+| **Capacity is checked once, at placement time.** The scheduling probe declares the workload's requests, so the node the scheduler picks can fit it — but once the probe is deleted, the running static Pod is invisible to the scheduler. A workload that outgrows its declared requests is neither rescheduled nor evicted. See [capacity](./about-placement-and-capacity.md#resource-accounting-is-a-deliberate-trade-off). |
+| **Fencing is eventually consistent.** A node keeps running its workload until its own manager removes the manifest. An unreachable node keeps it indefinitely unless `AbandonAfterGrace` is set, and even then the operator only stops tracking it. |
+| **One manager per node, one account for the cluster.** The manager reads every StaticSet and every ConfigMap and Secret those StaticSets reference, in every namespace. Narrowing that would mean one DaemonSet per namespace, each mounting the same host paths but seeing only its own namespace's placements. |
+| **Placement is one pass per generation.** A new node does not receive a DaemonSet-mode placement until the operator notices it is eligible, and a placement is not moved because a *better* node appeared: the scheduler is asked again on the next generation, not continuously. A probe pass holds a real reservation for the workload, so running it constantly would cost more than it bought. |
+| **Drift is repaired on an interval, not immediately.** The manager rewrites a manifest that no longer matches the revision it rendered, and it runs a periodic pass per placement (30 seconds by default), so a manifest edited on the node is corrected on the next pass rather than the instant it changes. There is no watch on ConfigMaps or Secrets, and no alert: the repair is visible only as the file changing back. |
+| **The probe's runtime class is a cluster prerequisite.** The probe needs a `RuntimeClass` whose handler no CRI implements; the chart installs one, and a cluster that manages runtime classes itself must set `probe.createRuntimeClass=false` and provide it. |
+| **A placement on a lost node outlives it.** Its record is reported as blocked, not deleted: the operator stops tracking it only under `AbandonAfterGrace`. Deleting the record by hand is safe — its finalizer belongs to a manager that is not there — but the residual manifest on that host becomes untracked. |
 
 ## Suggested next steps
 

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from static_sets.models import StaticSet
+from static_sets.placements import StaticPodPlacement
 
 BUNDLE = "/var/lib/static-sets"
 MANIFESTS = "/etc/kubernetes/manifests"
@@ -47,7 +48,6 @@ BASE_RESOURCE: dict[str, Any] = {
                 "volumes": [{"name": "conf", "configMap": {"name": "web-conf"}}],
             },
         },
-        "installer": {"image": "registry.example.com/static-sets:1.0"},
     },
 }
 
@@ -93,6 +93,41 @@ def build_static_set(**overrides: Any) -> StaticSet:
         The validated resource.
     """
     return StaticSet.model_validate(resource_dict(**overrides))
+
+
+PLACEMENT_BASE: dict[str, Any] = {
+    "apiVersion": "staticsets.cloudlane.dev/v1",
+    "kind": "StaticPodPlacement",
+    "metadata": {"name": "web-e6383089b2", "namespace": "edge", "generation": 1},
+    "spec": {
+        "staticSet": "web",
+        "staticSetUid": "0f9a4b6c-1111-2222-3333-444455556666",
+        "node": "worker-1",
+        "generation": 3,
+    },
+}
+
+
+def build_placement(**overrides: Any) -> StaticPodPlacement:
+    """Return a validated ``StaticPodPlacement`` with the given overrides applied.
+
+    Args:
+        **overrides: Fields to merge into the base body.
+
+    Returns:
+        The validated resource.
+    """
+    return StaticPodPlacement.model_validate(deep_merge(PLACEMENT_BASE, overrides))
+
+
+@pytest.fixture()
+def make_placement() -> Callable[..., StaticPodPlacement]:
+    """Return a factory for validated placement records.
+
+    Returns:
+        The factory.
+    """
+    return build_placement
 
 
 @pytest.fixture()

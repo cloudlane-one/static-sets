@@ -66,9 +66,6 @@ spec:
         - name: conf
           configMap:
             name: web-conf
-
-  installer:
-    image: ghcr.io/EXAMPLE/static-sets:0.1.0
 ```
 
 ```shell
@@ -78,27 +75,33 @@ kubectl apply -f web-staticset.yaml
 Worth noting about each part:
 
 - **`mode`** and **`replicas`** are a pair. `Deployment` mode requires `replicas`:
-  it is how many installer Pods exist, and therefore how many nodes will host the
-  workload. `DaemonSet` mode must *not* set `replicas`, because the DaemonSet
-  controller decides how many installers exist.
-- **`placement`** is what the scheduler uses to place installers. It is not copied
-  onto the workload; see [placement and capacity](./about-placement-and-capacity.md).
+  it is how many placements the operator asks the scheduler for, and therefore how
+  many nodes will host the workload. `DaemonSet` mode must *not* set `replicas`,
+  because the DaemonSet controller decides how many placements a pass produces.
+- **`placement`** is what the scheduler uses to place the *scheduling probe*, and
+  therefore the workload. It is not copied onto the workload itself; see
+  [placement and capacity](./about-placement-and-capacity.md).
 - **`template`** is an ordinary `PodTemplateSpec`, restricted to the subset the
-  operator can compile, and it must not carry its own placement fields.
-- **`installer.image`** is the image you built in
-  [How to install](./how-to-install.md#1-build-and-push-the-image). The installer's
-  two host paths default to `/etc/kubernetes/manifests` and `/var/lib/static-sets`;
-  set them explicitly if your kubelet is configured differently.
+  operator can compile, and it must not carry its own placement fields. Its containers'
+  `resources` are what the scheduler sees when it decides where the workload goes.
+- **Where the manifest is written** is not part of a StaticSet: the node manager is
+  configured once per node by the chart (`manager.staticPodPath`, `manager.bundleDir`),
+  so a StaticSet cannot widen the host access of the process that writes it.
 
 ## 3. Watch it install
 
-Installation is asynchronous: an installer Pod has to be scheduled, start, compile
-the workload and write it before anything is installed.
+Installation is asynchronous, and happens in visible steps: the controller creates a
+scheduling probe, the scheduler places it, and the manager on each chosen node compiles
+the workload and writes the manifest before anything is installed.
 
 ```shell
 kubectl -n static-sets get staticset web -o yaml
-kubectl -n static-sets get pods -l staticsets.cloudlane.dev/set=web -o wide
+kubectl -n static-sets get staticpodplacements -l staticsets.cloudlane.dev/set=web -o wide
+kubectl -n static-sets get replicasets -l app.kubernetes.io/component=scheduling-probe
 ```
+
+The probe workload is transient: it exists only while the scheduler's answer is being
+installed, and its Pods never start. The placement records are the durable part.
 
 The status separates what was **installed** from what was **observed**:
 
@@ -124,9 +127,9 @@ status:
       reason: AllPlacementsInstalled
 ```
 
-`placements` is what the installer *did*; `health` is what was *seen*. A placement
-can be `Installed` and unhealthy, or `Installed` and unobservable because its node is
-gone, and the two are never conflated.
+`placements` is what the node's manager *did*; `health` is what kubelet was *seen* to
+run. A placement can be `Installed` and unhealthy, or `Installed` and unobservable
+because its node is gone, and the two are never conflated.
 
 ## 4. Change it
 

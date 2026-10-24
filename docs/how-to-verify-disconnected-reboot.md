@@ -6,11 +6,12 @@ it needs a host that boots, a kubelet that reads a file, and no API server reach
 This page is the reproducible procedure.
 
 **What CI verifies** (`STATIC_SETS_K8S_INTEGRATION=1`, see `tests/test_e2e.py`): on a
-real cluster, a StaticSet's installer compiles the workload, materializes its
-configuration, writes the manifest into the configured directory, acknowledges the
-placement, and removes it again on cleanup. The end-to-end suite deliberately points
-`staticPodPath` at a directory kubelet does not watch, so it can run against a kind
-cluster whose control plane is itself static Pods.
+real cluster, a StaticSet is placed by the scheduler, the node's manager compiles the
+workload, materializes its configuration, writes the manifest into kubelet's own
+directory, acknowledges the placement, and kubelet publishes the mirror Pod for what it
+started — then the whole thing is removed again on cleanup. The suite pins the workload
+to one node, so it can run against a kind cluster whose control plane is itself tagged
+with static Pods, without ever touching one of them.
 
 **What CI does not verify:** that a rebooted kubelet starts that manifest. That is
 this procedure.
@@ -31,12 +32,12 @@ Use a StaticSet whose `staticPodPath` matches the host's real kubelet configurat
 guess it: the operator never edits kubelet configuration, so a mismatch is a silent
 no-op at the kubelet level.
 
-```yaml
-spec:
-  installer:
-    image: ghcr.io/EXAMPLE/static-sets:0.1.0
-    staticPodPath: /etc/kubernetes/manifests   # must match kubelet
-    bundleDir: /var/lib/static-sets
+```shell
+# The manager's paths are the node's, so they are chart values, not StaticSet fields.
+helm get values static-sets -n static-sets | grep -A3 manager:
+# manager:
+#   staticPodPath: /etc/kubernetes/manifests   # must match kubelet
+#   bundleDir: /var/lib/static-sets
 ```
 
 ```shell
@@ -50,7 +51,7 @@ kubectl get staticset reboot-test -o jsonpath='{.status.placements[*].revision}{
 kubectl get staticset reboot-test -o jsonpath='{.status.placements[*].acknowledged}{"\n"}'
 ```
 
-Both must be non-empty and `true`. An unacknowledged placement means the installer
+Both must be non-empty and `true`. An unacknowledged placement means the node's manager
 never finished, and a reboot test on top of it proves nothing.
 
 ### 3. Record what the node has, without the cluster
@@ -139,7 +140,7 @@ kubectl delete -f reboot-test.yaml
   the reboot guarantee.
 - **Disconnected revision retention.** While disconnected, the last committed
   revision must stay active. `spec.offline.retainedRevisions` keeps older revisions on
-  the node so a failed update can be rolled back; the installer never prunes the
+  the node so a failed update can be rolled back; the manager never prunes the
   active one.
 - **Image absence.** With `spec.offline.imageProvisioning: VerifiedBeforeInstall`, a
   revision whose images are not confirmed present is refused, so you cannot install

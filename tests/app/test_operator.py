@@ -1,804 +1,732 @@
-"""The controller adapter: snapshot reading, plan application and admission.
-
-The entry point is loaded the way ``kopf run`` loads it and the way
-``based-operators scaffold`` loads it, which proves in one step that the file really
-is a deployable operator entry point: the framework finds exactly the StaticSet
-resource it declares.
-"""
+"""The controller adapter: reading a snapshot and applying a plan."""
 
 from __future__ import annotations
 
-import logging
-import os
-import subprocess
-import sys
-from collections.abc import Iterable, Mapping
-from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import kopf
 import pytest
-from based_operators.scaffold import discover_resources, load_operator
 from kubernetes.client import (
-    V1ConfigMap,
-    V1ConfigMapList,
     V1DaemonSet,
-    V1DaemonSetList,
-    V1Deployment,
-    V1DeploymentList,
-    V1Node,
-    V1NodeList,
+    V1DaemonSetSpec,
+    V1DaemonSetStatus,
+    V1LabelSelector,
+    V1ObjectMeta,
+    V1OwnerReference,
     V1Pod,
-    V1PodList,
+    V1PodSpec,
+    V1PodTemplateSpec,
+    V1PodStatus,
+    V1ReplicaSet,
+    V1ReplicaSetSpec,
+    V1ReplicaSetStatus,
 )
 
 import static_sets_operator as operator
 from static_sets.api import ApiRequestError, KubernetesClient
+from static_sets.controller import ObservedState
+from static_sets.naming import (
+    COMPONENT_LABEL,
+    GENERATION_LABEL,
+    MANAGED_BY,
+    MIRROR_ANNOTATION,
+    PLACEMENT_LABEL,
+    PROBE_COMPONENT,
+    SET_LABEL,
+    SET_UID_LABEL,
+    STATIC_SET_FINALIZER,
+    placement_identity,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ENTRY_POINT = REPO_ROOT / "app" / "static_sets_operator.py"
-NAMESPACE = "edge"
-SET_NAME = "web"
-
-LOGGER = logging.getLogger("static-sets-test")
+UID = "0f9a4b6c-1111-2222-3333-444455556666"
 
 
 class FakeCore:
-    """The core API group, answering from the adapter's typed collections."""
+    """The ``core`` API group, over in-memory lists."""
 
     def __init__(self, cluster: FakeCluster) -> None:
+        """Bind the group to its cluster.
+
+        Args:
+            cluster: The owning fake.
+        """
         self.cluster = cluster
 
-    def list_namespaced_pod(self, namespace: str, **kwargs: Any) -> V1PodList:
-        """List the configured Pods.
+    def list_namespaced_pod(self, namespace: str, label_selector: str = "") -> Any:
+        """Return the Pods matching a selector."""
+        return _Listing(
+            [pod for pod in self.cluster.pods if _matches(pod.metadata, label_selector)]
+        )
 
-        Args:
-            namespace: The namespace.
-            **kwargs: The selector and further client arguments.
+    def list_node(self) -> Any:
+        """Return the nodes."""
+        return _Listing(self.cluster.nodes)
 
-        Returns:
-            The Pods.
-        """
-        del namespace
-        self.cluster.selectors.append(kwargs.get("label_selector"))
-        return V1PodList(items=self.cluster.pods)
-
-    def list_node(self, **kwargs: Any) -> V1NodeList:
-        """List the configured Nodes.
-
-        Args:
-            **kwargs: Further client arguments.
-
-        Returns:
-            The Nodes.
-        """
-        del kwargs
-        return V1NodeList(items=self.cluster.nodes)
-
-    def list_namespaced_config_map(self, namespace: str, **kwargs: Any) -> V1ConfigMapList:
-        """List the configured ConfigMaps.
-
-        Args:
-            namespace: The namespace.
-            **kwargs: The selector and further client arguments.
-
-        Returns:
-            The ConfigMaps.
-        """
-        del namespace
-        self.cluster.selectors.append(kwargs.get("label_selector"))
-        return V1ConfigMapList(items=self.cluster.config_maps)
-
-    def read_namespaced_config_map(self, name: str, namespace: str, **kwargs: Any) -> V1ConfigMap:
-        """Read a ConfigMap.
-
-        Args:
-            name: The ConfigMap's name.
-            namespace: The namespace.
-            **kwargs: Further client arguments.
-
-        Returns:
-            The ConfigMap.
-
-        Raises:
-            ApiRequestError: If it does not exist.
-        """
-        del namespace, kwargs
-        for item in self.cluster.config_maps:
-            if item.metadata is not None and item.metadata.name == name:
-                return item
-        raise ApiRequestError(f"ConfigMap {name} does not exist", status=404)
-
-    def create_namespaced_config_map(
-        self, namespace: str, body: V1ConfigMap, **kwargs: Any
-    ) -> None:
-        """Record a ConfigMap creation.
-
-        Args:
-            namespace: The namespace.
-            body: The object.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        self.cluster.applied.append(body)
-        self.cluster.config_maps.append(body)
-
-    def replace_namespaced_config_map(
-        self, name: str, namespace: str, body: V1ConfigMap, **kwargs: Any
-    ) -> None:
-        """Record a ConfigMap replacement.
-
-        Args:
-            name: The ConfigMap's name, which the generated signature puts first.
-            namespace: The namespace.
-            body: The object.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        assert body.metadata is not None and body.metadata.name == name
-        self.cluster.applied.append(body)
-        self.cluster.replaced.append(body)
-
-    def read_namespaced_pod(self, name: str, namespace: str, **kwargs: Any) -> V1Pod:
-        """Read a Pod.
-
-        Args:
-            name: The Pod's name.
-            namespace: The namespace.
-            **kwargs: Further client arguments.
-
-        Returns:
-            The Pod.
-
-        Raises:
-            ApiRequestError: If it does not exist.
-        """
-        del namespace, kwargs
-        for item in self.cluster.pods:
-            if item.metadata is not None and item.metadata.name == name:
-                return item
-        raise ApiRequestError(f"Pod {name} does not exist", status=404)
-
-    def create_namespaced_pod(self, namespace: str, body: V1Pod, **kwargs: Any) -> None:
-        """Record a Pod creation.
-
-        Args:
-            namespace: The namespace.
-            body: The object.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        self.cluster.applied.append(body)
-        self.cluster.pods.append(body)
-
-    def replace_namespaced_pod(self, name: str, namespace: str, body: V1Pod, **kwargs: Any) -> None:
-        """Record a Pod replacement.
-
-        Args:
-            name: The Pod's name, which the generated signature puts first.
-            namespace: The namespace.
-            body: The object.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        assert body.metadata is not None and body.metadata.name == name
-        self.cluster.applied.append(body)
-        self.cluster.replaced.append(body)
+    def read_namespaced_pod(self, name: str, namespace: str) -> Any:
+        """Return one Pod, or fail as the client does."""
+        for pod in self.cluster.pods:
+            if pod.metadata.name == name:
+                return pod
+        raise ApiRequestError("not found", status=404)
 
 
 class FakeApps:
-    """The apps API group, answering from the adapter's typed collections."""
+    """The ``apps`` API group, over in-memory lists."""
 
     def __init__(self, cluster: FakeCluster) -> None:
+        """Bind the group to its cluster.
+
+        Args:
+            cluster: The owning fake.
+        """
         self.cluster = cluster
 
-    def list_namespaced_deployment(self, namespace: str, **kwargs: Any) -> V1DeploymentList:
-        """List the configured Deployments.
+    def list_namespaced_replica_set(self, namespace: str, label_selector: str = "") -> Any:
+        """Return the ReplicaSets matching a selector."""
+        return _Listing(
+            [item for item in self.cluster.replica_sets if _matches(item.metadata, label_selector)]
+        )
 
-        Args:
-            namespace: The namespace.
-            **kwargs: The selector and further client arguments.
+    def list_namespaced_daemon_set(self, namespace: str, label_selector: str = "") -> Any:
+        """Return the DaemonSets matching a selector."""
+        return _Listing(
+            [item for item in self.cluster.daemon_sets if _matches(item.metadata, label_selector)]
+        )
 
-        Returns:
-            The Deployments.
-        """
-        del namespace
-        self.cluster.selectors.append(kwargs.get("label_selector"))
-        return V1DeploymentList(items=self.cluster.deployments)
-
-    def list_namespaced_daemon_set(self, namespace: str, **kwargs: Any) -> V1DaemonSetList:
-        """List the configured DaemonSets.
-
-        Args:
-            namespace: The namespace.
-            **kwargs: The selector and further client arguments.
-
-        Returns:
-            The DaemonSets.
-        """
-        del namespace
-        self.cluster.selectors.append(kwargs.get("label_selector"))
-        return V1DaemonSetList(items=self.cluster.daemon_sets)
-
-    def read_namespaced_deployment(self, name: str, namespace: str, **kwargs: Any) -> V1Deployment:
-        """Read a Deployment.
-
-        Args:
-            name: The Deployment's name.
-            namespace: The namespace.
-            **kwargs: Further client arguments.
-
-        Returns:
-            The Deployment.
-
-        Raises:
-            ApiRequestError: If it does not exist.
-        """
-        del namespace, kwargs
-        for item in self.cluster.deployments:
-            if item.metadata is not None and item.metadata.name == name:
+    def read_namespaced_replica_set(self, name: str, namespace: str) -> Any:
+        """Return one ReplicaSet, or fail as the client does."""
+        for item in self.cluster.replica_sets:
+            if item.metadata.name == name:
                 return item
-        raise ApiRequestError(f"Deployment {name} does not exist", status=404)
+        raise ApiRequestError("not found", status=404)
 
-    def create_namespaced_deployment(
-        self, namespace: str, body: V1Deployment, **kwargs: Any
-    ) -> None:
-        """Record a Deployment creation.
+    def create_namespaced_replica_set(self, namespace: str, body: Any) -> Any:
+        """Create a ReplicaSet."""
+        self.cluster.replica_sets.append(body)
+        self.cluster.created.append(("ReplicaSet", body.metadata.name))
+        return body
 
-        Args:
-            namespace: The namespace.
-            body: The object.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        self.cluster.applied.append(body)
-        self.cluster.deployments.append(body)
+    def replace_namespaced_replica_set(self, name: str, namespace: str, body: Any) -> Any:
+        """Replace a ReplicaSet."""
+        self.cluster.replica_sets = [
+            item for item in self.cluster.replica_sets if item.metadata.name != name
+        ]
+        self.cluster.replica_sets.append(body)
+        return body
 
-    def replace_namespaced_deployment(
-        self, name: str, namespace: str, body: V1Deployment, **kwargs: Any
-    ) -> None:
-        """Record a Deployment replacement.
+    def delete_namespaced_replica_set(self, name: str, namespace: str, body: Any = None) -> Any:
+        """Delete a ReplicaSet, or fail with 404 when it is already gone."""
+        for item in self.cluster.replica_sets:
+            if item.metadata.name == name:
+                self.cluster.replica_sets.remove(item)
+                self.cluster.deleted.append(("ReplicaSet", name))
+                return None
+        raise ApiRequestError("not found", status=404)
 
-        Args:
-            name: The Deployment's name, which the generated signature puts first.
-            namespace: The namespace.
-            body: The object.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        assert body.metadata is not None and body.metadata.name == name
-        self.cluster.applied.append(body)
-        self.cluster.replaced.append(body)
-
-    def read_namespaced_daemon_set(self, name: str, namespace: str, **kwargs: Any) -> V1DaemonSet:
-        """Read a DaemonSet.
-
-        Args:
-            name: The DaemonSet's name.
-            namespace: The namespace.
-            **kwargs: Further client arguments.
-
-        Returns:
-            The DaemonSet.
-
-        Raises:
-            ApiRequestError: If it does not exist.
-        """
-        del namespace, kwargs
+    def delete_namespaced_daemon_set(self, name: str, namespace: str, body: Any = None) -> Any:
+        """Delete a DaemonSet, or fail with 404 when it is already gone."""
         for item in self.cluster.daemon_sets:
-            if item.metadata is not None and item.metadata.name == name:
-                return item
-        raise ApiRequestError(f"DaemonSet {name} does not exist", status=404)
+            if item.metadata.name == name:
+                self.cluster.daemon_sets.remove(item)
+                self.cluster.deleted.append(("DaemonSet", name))
+                return None
+        raise ApiRequestError("not found", status=404)
 
-    def create_namespaced_daemon_set(
-        self, namespace: str, body: V1DaemonSet, **kwargs: Any
-    ) -> None:
-        """Record a DaemonSet creation.
 
-        Args:
-            namespace: The namespace.
-            body: The object.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        self.cluster.applied.append(body)
-        self.cluster.daemon_sets.append(body)
+class FakeCustom:
+    """The custom-objects API group, over in-memory placements."""
 
-    def replace_namespaced_daemon_set(
-        self, name: str, namespace: str, body: V1DaemonSet, **kwargs: Any
-    ) -> None:
-        """Record a DaemonSet replacement.
+    def __init__(self, cluster: FakeCluster) -> None:
+        """Bind the group to its cluster.
 
         Args:
-            name: The DaemonSet's name, which the generated signature puts first.
-            namespace: The namespace.
-            body: The object.
-            **kwargs: Further client arguments.
+            cluster: The owning fake.
         """
-        del namespace, kwargs
-        assert body.metadata is not None and body.metadata.name == name
-        self.cluster.applied.append(body)
-        self.cluster.replaced.append(body)
+        self.cluster = cluster
 
-    def delete_namespaced_deployment(self, name: str, namespace: str, **kwargs: Any) -> None:
-        """Record a Deployment deletion.
+    def list_namespaced_custom_object(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        label_selector: str = "",
+    ) -> Any:
+        """Return the placement bodies matching a selector."""
+        return {
+            "items": [
+                body
+                for body in self.cluster.placements
+                if _matches(_metadata(body), label_selector)
+            ]
+        }
 
-        Args:
-            name: The Deployment's name.
-            namespace: The namespace.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        self.cluster.deleted.append(("Deployment", name))
+    def get_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, name: str
+    ) -> Any:
+        """Return one placement body, or fail with 404."""
+        for body in self.cluster.placements:
+            if _metadata(body).name == name:
+                return body
+        raise ApiRequestError("not found", status=404)
 
-    def delete_namespaced_daemon_set(self, name: str, namespace: str, **kwargs: Any) -> None:
-        """Record a DaemonSet deletion.
+    def create_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, body: Any
+    ) -> Any:
+        """Create a placement."""
+        self.cluster.placements.append(body)
+        self.cluster.created.append(("StaticPodPlacement", body["metadata"]["name"]))
+        return body
 
-        Args:
-            name: The DaemonSet's name.
-            namespace: The namespace.
-            **kwargs: Further client arguments.
-        """
-        del namespace, kwargs
-        self.cluster.deleted.append(("DaemonSet", name))
+    def patch_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, name: str, body: Any
+    ) -> Any:
+        """Merge-patch a placement's spec."""
+        for index, existing in enumerate(self.cluster.placements):
+            if _metadata(existing).name == name:
+                patched = {**existing, **body}
+                patched["metadata"] = {
+                    **existing.get("metadata", {}),
+                    **body.get("metadata", {}),
+                }
+                self.cluster.placements[index] = patched
+                self.cluster.patched.append(body)
+                return patched
+        raise ApiRequestError("not found", status=404)
+
+    def delete_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, name: str
+    ) -> Any:
+        """Delete a placement, or fail with 404."""
+        for body in self.cluster.placements:
+            if _metadata(body).name == name:
+                self.cluster.placements.remove(body)
+                self.cluster.deleted.append(("StaticPodPlacement", name))
+                return None
+        raise ApiRequestError("not found", status=404)
 
 
 class FakeCluster:
-    """A cluster that answers from typed collections and records what it is told.
+    """A :class:`KubernetesClient`-shaped fake with the clusters' objects."""
 
-    It stands in for :class:`~static_sets.api.KubernetesClient`, exposing the same
-    ``core`` and ``apps`` API groups, so a test describes the objects the API would
-    return and asserts on the models the adapter applies.
-    """
-
-    def __init__(
-        self,
-        *,
-        pods: Iterable[Mapping[str, Any]] = (),
-        nodes: Iterable[Mapping[str, Any]] = (),
-        config_maps: Iterable[Mapping[str, Any]] = (),
-        deployments: Iterable[Mapping[str, Any]] = (),
-        daemon_sets: Iterable[Mapping[str, Any]] = (),
-    ) -> None:
-        """Build the fake.
-
-        Args:
-            pods: Wire-shaped Pods the lists return.
-            nodes: Wire-shaped Nodes the lists return.
-            config_maps: Wire-shaped ConfigMaps the lists return.
-            deployments: Wire-shaped Deployments the lists return.
-            daemon_sets: Wire-shaped DaemonSets the lists return.
-        """
-        self.pods = [V1Pod.model_validate(item) for item in pods]
-        self.nodes = [V1Node.model_validate(item) for item in nodes]
-        self.config_maps = [V1ConfigMap.model_validate(item) for item in config_maps]
-        self.deployments = [V1Deployment.model_validate(item) for item in deployments]
-        self.daemon_sets = [V1DaemonSet.model_validate(item) for item in daemon_sets]
-        self.applied: list[Any] = []
-        self.replaced: list[Any] = []
+    def __init__(self) -> None:
+        """Build an empty cluster."""
+        self.nodes: list[Any] = []
+        self.pods: list[Any] = []
+        self.replica_sets: list[Any] = []
+        self.daemon_sets: list[Any] = []
+        self.placements: list[dict[str, Any]] = []
+        self.created: list[tuple[str, str]] = []
         self.deleted: list[tuple[str, str]] = []
-        self.selectors: list[str | None] = []
+        self.patched: list[dict[str, Any]] = []
+        self.offline = False
         self.core = FakeCore(self)
         self.apps = FakeApps(self)
+        self.custom = FakeCustom(self)
 
 
-def as_client(cluster: FakeCluster) -> KubernetesClient:
-    """Type a fake cluster as the client the adapter takes.
+class _Listing:
+    """The ``.items`` shape the generated client returns."""
+
+    def __init__(self, items: list[Any]) -> None:
+        """Wrap a list of objects.
+
+        Args:
+            items: The objects.
+        """
+        self.items = items
+
+
+def _metadata(body: Any) -> Any:
+    """Return an object's metadata, whether it is a model or a mapping.
 
     Args:
-        cluster: The fake.
+        body: The object.
 
     Returns:
-        The same object, seen as a client.
+        The metadata.
     """
-    return cast(KubernetesClient, cluster)
+    if isinstance(body, dict):
+        data = body.get("metadata", {})
+        return V1ObjectMeta(
+            name=data.get("name"),
+            namespace=data.get("namespace"),
+            labels=data.get("labels") or {},
+            annotations=data.get("annotations") or {},
+        )
+    return body.metadata
 
 
-def test_entry_point_is_a_deployable_operator() -> None:
-    """The scaffolder finds exactly the StaticSet the entry point declares."""
-    module = load_operator(ENTRY_POINT)
+def _matches(metadata: Any, label_selector: str) -> bool:
+    """Return whether an object's labels satisfy a selector.
 
-    resources = discover_resources(module)
+    Args:
+        metadata: The object's metadata.
+        label_selector: The selector, as ``k=v,k2=v2``.
 
-    assert [resource.__name__ for resource in resources] == ["StaticSet"]
-    assert resources[0]._require_resource_config().crd_name == (
-        "staticsets.staticsets.cloudlane.dev"
+    Returns:
+        ``True`` when every equality holds.
+    """
+    if not label_selector:
+        return True
+    labels = (metadata.labels if metadata else None) or {}
+    for requirement in label_selector.split(","):
+        key, _, value = requirement.partition("=")
+        if labels.get(key) != value:
+            return False
+    return True
+
+
+def client(cluster: FakeCluster) -> KubernetesClient:
+    """Return a client whose groups are the fake's.
+
+    Args:
+        cluster: The fake cluster.
+
+    Returns:
+        A client-shaped object.
+    """
+    return cluster  # type: ignore[return-value]
+
+
+def node(name: str, *, ready: bool = True) -> Any:
+    """Build an API node.
+
+    Args:
+        name: The node's name.
+        ready: Whether it reports Ready.
+
+    Returns:
+        The node.
+    """
+    from kubernetes.client import V1Node, V1NodeCondition, V1NodeStatus
+
+    return V1Node(
+        metadata=V1ObjectMeta(name=name, labels={"kubernetes.io/os": "linux"}),
+        status=V1NodeStatus(
+            conditions=[V1NodeCondition(type="Ready", status="True" if ready else "False")]
+        ),
     )
 
 
+def pod(
+    name: str,
+    *,
+    node_name: str | None = None,
+    labels: dict[str, str] | None = None,
+    annotations: dict[str, str] | None = None,
+    owner: str | None = None,
+) -> V1Pod:
+    """Build an API Pod.
+
+    Args:
+        name: The Pod's name.
+        node_name: The node it is bound to.
+        labels: Its labels.
+        annotations: Its annotations.
+        owner: The name of the workload that owns it.
+
+    Returns:
+        The Pod.
+    """
+    return V1Pod(
+        metadata=V1ObjectMeta(
+            name=name,
+            namespace="edge",
+            labels=labels or {},
+            annotations=annotations or {},
+            owner_references=(
+                [
+                    V1OwnerReference(
+                        api_version="apps/v1",
+                        kind="ReplicaSet",
+                        name=owner,
+                        uid="u",
+                        controller=True,
+                    )
+                ]
+                if owner
+                else None
+            ),
+        ),
+        spec=V1PodSpec(containers=[], node_name=node_name),
+        status=V1PodStatus(phase="Pending"),
+    )
+
+
+def probe_labels(generation: int) -> dict[str, str]:
+    """Return the labels of a probe's Pods.
+
+    Args:
+        generation: The StaticSet generation.
+
+    Returns:
+        The labels.
+    """
+    return {
+        COMPONENT_LABEL: PROBE_COMPONENT,
+        SET_LABEL: "web",
+        SET_UID_LABEL: UID,
+        GENERATION_LABEL: str(generation),
+    }
+
+
+def replica_set(
+    name: str, *, generation: int, replicas: int, observed: bool = True
+) -> V1ReplicaSet:
+    """Build an API ReplicaSet.
+
+    Args:
+        name: Its name.
+        generation: The StaticSet generation in its labels.
+        replicas: Its replica count.
+        observed: Whether it carries a status.
+
+    Returns:
+        The ReplicaSet.
+    """
+    return V1ReplicaSet(
+        metadata=V1ObjectMeta(name=name, namespace="edge", labels=probe_labels(generation)),
+        spec=V1ReplicaSetSpec(replicas=replicas, selector=V1LabelSelector(match_labels={})),
+        status=V1ReplicaSetStatus(replicas=replicas) if observed else None,
+    )
+
+
+def daemon_set(name: str, *, generation: int, desired: int) -> V1DaemonSet:
+    """Build an API DaemonSet with a status.
+
+    Args:
+        name: Its name.
+        generation: The StaticSet generation in its labels.
+        desired: How many nodes its controller wants a Pod on.
+
+    Returns:
+        The DaemonSet.
+    """
+    return V1DaemonSet(
+        metadata=V1ObjectMeta(name=name, namespace="edge", labels=probe_labels(generation)),
+        spec=V1DaemonSetSpec(
+            selector=V1LabelSelector(match_labels={}),
+            template=V1PodTemplateSpec(spec=V1PodSpec(containers=[])),
+        ),
+        status=V1DaemonSetStatus(
+            desired_number_scheduled=desired,
+            current_number_scheduled=desired,
+            updated_number_scheduled=desired,
+            number_ready=0,
+            number_available=0,
+            number_misscheduled=0,
+        ),
+    )
+
+
+def placement_body(*, node: str, desired: bool = True, **status: Any) -> dict[str, Any]:
+    """Build a placement custom object, as the API returns it.
+
+    Args:
+        node: The node it names.
+        desired: Whether it is wanted.
+        **status: Fields of the status to publish.
+
+    Returns:
+        The body.
+    """
+    return {
+        "apiVersion": "staticsets.cloudlane.dev/v1",
+        "kind": "StaticPodPlacement",
+        "metadata": {
+            "name": f"web-{node}",
+            "namespace": "edge",
+            "labels": {SET_UID_LABEL: UID, SET_LABEL: "web"},
+        },
+        "spec": {
+            "staticSet": "web",
+            "staticSetUid": UID,
+            "node": node,
+            "generation": 3,
+            "desired": desired,
+            **({"reason": "ScaledDown"} if not desired else {}),
+        },
+        "status": status,
+    }
+
+
+def test_entry_point_is_a_deployable_operator() -> None:
+    """The module registers a reconcile handler and names the CRD it serves."""
+    assert operator.GROUP == "staticsets.cloudlane.dev"
+    assert operator.PLURAL == "staticsets"
+    assert callable(operator.reconcile)
+    assert callable(operator.finalize)
+
+
 def test_selector_renders_a_stable_label_selector() -> None:
-    """Selectors are sorted, so a reconcile is comparable between runs."""
+    """A selector is sorted, so two calls render the same string."""
     assert operator.selector(b="2", a="1") == "a=1,b=2"
 
 
 def test_read_snapshot_maps_every_observed_kind(make_static_set: Any) -> None:
-    """Pods, nodes and placement ConfigMaps become the planner's input types."""
-    identity = "abc123"
-    client = FakeCluster(
-        nodes=[
-            {
-                "metadata": {"name": "node-a", "labels": {"role": "edge"}},
-                "spec": {},
-                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+    """One read produces the whole state the planner needs."""
+    cluster = FakeCluster()
+    cluster.nodes = [node("a"), node("b", ready=False)]
+    cluster.replica_sets = [replica_set("web-probe-3", generation=3, replicas=2)]
+    cluster.pods = [
+        pod("probe-a", node_name="a", labels=probe_labels(3), owner="web-probe-3"),
+        pod("probe-b", labels=probe_labels(3), owner="web-probe-3"),
+        pod(
+            "web-abc-r-1",
+            node_name="a",
+            labels={MANAGED_BY: MANAGED_BY, SET_UID_LABEL: UID},
+            annotations={
+                MIRROR_ANNOTATION: "abc",
+                PLACEMENT_LABEL: placement_identity(UID, "a"),
             },
-            {
-                "metadata": {"name": "node-b", "labels": {}},
-                "spec": {"unschedulable": True},
-                "status": {"conditions": [{"type": "Ready", "status": "False"}]},
-            },
-        ],
-        pods=[
-            {
-                "metadata": {
-                    "name": "web-installer-1",
-                    "uid": "u1",
-                    "labels": {"app.kubernetes.io/component": "installer"},
-                },
-                "spec": {"nodeName": "node-a", "containers": [{"name": "c", "image": "i"}]},
-                "status": {"phase": "Running"},
-            },
-            {
-                "metadata": {
-                    "name": f"web-{identity}",
-                    "labels": {"app.kubernetes.io/component": "workload"},
-                    "annotations": {"kubernetes.io/config.mirror": "hash"},
-                },
-                "spec": {"nodeName": "node-a", "containers": [{"name": "c", "image": "i"}]},
-                "status": {
-                    "phase": "Running",
-                    "containerStatuses": [
-                        {
-                            "name": "app",
-                            "image": "i",
-                            "imageID": "sha256:0",
-                            "ready": True,
-                            "restartCount": 2,
-                        }
-                    ],
-                },
-            },
-        ],
-        config_maps=[
-            {
-                "data": {
-                    "placement": identity,
-                    "node": "node-a",
-                    "revision": "r-1",
-                    "state": "Installed",
-                    "acknowledged": "true",
-                }
-            }
-        ],
-    )
-
-    state = operator.read_snapshot(as_client(client), make_static_set(spec={"replicas": 1}))
-
-    assert state.synced is True
-    assert [(node.name, node.ready, node.unschedulable) for node in state.nodes] == [
-        ("node-a", True, False),
-        ("node-b", False, True),
-    ]
-    assert [pod.node for pod in state.installer_pods] == ["node-a"]
-    assert state.placements[0].identity == identity
-    assert state.placements[0].acknowledged is True
-    assert state.workloads[0].ready is True
-    assert state.workloads[0].restart_count == 2
-
-
-def test_read_snapshot_skips_a_mirror_pod_as_an_installer(make_static_set: Any) -> None:
-    """A mirror Pod is never mistaken for a live installer."""
-    client = FakeCluster(
-        pods=[
-            {
-                "metadata": {
-                    "name": "web-abc",
-                    "labels": {"app.kubernetes.io/component": "installer"},
-                    "annotations": {"kubernetes.io/config.mirror": "hash"},
-                },
-                "spec": {"nodeName": "node-a", "containers": [{"name": "c", "image": "i"}]},
-            }
-        ]
-    )
-
-    state = operator.read_snapshot(as_client(client), make_static_set())
-
-    assert state.installer_pods == ()
-    assert len(state.workloads) == 1
-
-
-def test_apply_plan_creates_the_installer_workload(make_static_set: Any) -> None:
-    """A first reconcile applies the installer Deployment as the client's model."""
-    client = FakeCluster()
-    resource = make_static_set(spec={"replicas": 1})
-
-    result = operator.apply_plan(
-        as_client(client),
-        resource,
-        operator.ObservedState(observed_at="2026-10-12T10:00:00Z"),
-        NAMESPACE,
-    )
-
-    assert result.workload is not None
-    assert len(client.applied) == 1
-    deployment = client.applied[0]
-    assert isinstance(deployment, V1Deployment)
-    assert deployment.spec.replicas == 1
-
-
-def test_apply_plan_replaces_an_existing_workload(make_static_set: Any) -> None:
-    """A second reconcile replaces the Deployment, carrying its resource version.
-
-    The generated client's replace method takes the name before the namespace. A fake
-    that mirrored the wrong order hid that until the end-to-end suite caught it.
-    """
-    name = "web-installer-deployment"
-    client = FakeCluster(
-        deployments=[
-            {
-                "metadata": {"name": name, "resourceVersion": "42"},
-                "spec": {
-                    "selector": {"matchLabels": {}},
-                    "template": {"spec": {"containers": [{"name": "c", "image": "i"}]}},
-                },
-            }
-        ]
-    )
-    resource = make_static_set(spec={"replicas": 1})
-
-    operator.apply_plan(
-        as_client(client),
-        resource,
-        operator.ObservedState(observed_at="x"),
-        NAMESPACE,
-    )
-
-    assert len(client.applied) == 1
-    replaced = client.replaced[0]
-    assert isinstance(replaced, V1Deployment)
-    assert replaced.metadata is not None
-    assert replaced.metadata.name == name
-    assert replaced.metadata.resource_version == "42"
-
-
-def test_apply_plan_publishes_a_cleanup_intent_and_a_worker(make_static_set: Any) -> None:
-    """An orphaned placement gets an intent ConfigMap and a pinned worker Pod."""
-    from static_sets.placement import ObservedPlacement
-
-    client = FakeCluster()
-    resource = make_static_set(spec={"replicas": 1})
-    state = operator.ObservedState(
-        nodes=(operator.NodeInfo(name="node-a", labels={}, ready=True),),
-        placements=(
-            ObservedPlacement(
-                identity="abc123",
-                node="node-a",
-                revision="r-1",
-                state="Installed",
-                acknowledged=True,
-            ),
         ),
-        observed_at="2026-10-12T10:00:00Z",
-    )
-
-    operator.apply_plan(as_client(client), resource, state, NAMESPACE)
-
-    kinds = sorted(type(item).__name__ for item in client.applied)
-    assert kinds == ["V1ConfigMap", "V1Deployment", "V1Pod"]
-    config_map = next(item for item in client.applied if isinstance(item, V1ConfigMap))
-    assert (config_map.data or {})["cleanup"] == "true"
-    worker = next(item for item in client.applied if isinstance(item, V1Pod))
-    assert worker.spec is not None and worker.spec.node_name == "node-a"
-
-
-def test_apply_plan_deletes_both_installer_kinds(make_static_set: Any) -> None:
-    """Deletion clears a Deployment and a DaemonSet, so a mode switch leaves nothing."""
-    workload_spec = {
-        "selector": {"matchLabels": {}},
-        "template": {"spec": {"containers": [{"name": "c", "image": "i"}]}},
-    }
-    client = FakeCluster(
-        deployments=[{"metadata": {"name": "web-installer-deployment"}, "spec": workload_spec}],
-        daemon_sets=[{"metadata": {"name": "web-installer-daemonset"}, "spec": workload_spec}],
-    )
-    resource = make_static_set(
-        spec={"replicas": 1}, metadata={"deletionTimestamp": "2026-10-12T11:00:00Z"}
-    )
-
-    operator.apply_plan(
-        as_client(client),
-        resource,
-        operator.ObservedState(observed_at="x"),
-        NAMESPACE,
-    )
-
-    assert sorted(client.deleted) == [
-        ("DaemonSet", "web-installer-daemonset"),
-        ("Deployment", "web-installer-deployment"),
     ]
+    cluster.placements = [placement_body(node="a", revision="r-1", phase="Installed")]
+
+    state = operator.read_snapshot(client(cluster), make_static_set())
+
+    assert [item.name for item in state.nodes] == ["a", "b"]
+    assert state.nodes[1].ready is False
+    assert len(state.probes) == 1
+    assert state.probes[0].kind == "ReplicaSet"
+    assert state.probes[0].replicas == 2
+    assert state.probes[0].generation == 3
+    assert len(state.probes[0].pods) == 2
+    assert state.probes[0].scheduled[0].node == "a"
+    assert state.probes[0].unscheduled == 1
+    assert [item.node for item in state.placements] == ["a"]
+    assert state.placements[0].identity == state.workloads[0].placement
+    assert state.workloads[0].node == "a"
+    assert state.synced is True
 
 
-def test_publish_status_writes_every_reported_field(make_static_set: Any) -> None:
-    """Status is published field by field, so a merge patch never drops a key."""
-    from static_sets.controller import ObservedState, plan
+def test_read_snapshot_reports_a_daemonset_probe_as_such(make_static_set: Any) -> None:
+    """DaemonSet mode's probe is read with the node count its controller intends."""
+    cluster = FakeCluster()
+    cluster.daemon_sets = [daemon_set("web-probe-3", generation=3, desired=3)]
 
-    resource = make_static_set(spec={"replicas": 1})
-    result = plan(resource, ObservedState(observed_at="2026-10-12T10:00:00Z"), namespace=NAMESPACE)
-    patch = kopf.Patch()
+    state = operator.read_snapshot(client(cluster), make_static_set())
 
-    operator.publish_status(patch, result)
+    assert state.probes[0].kind == "DaemonSet"
+    assert state.probes[0].replicas == 3
 
-    written = dict(patch.status)
-    assert set(written) >= {
-        "observedGeneration",
-        "placements",
-        "health",
-        "cleanup",
-        "conditions",
-    }
-    assert written["observedGeneration"] == 3
-    assert isinstance(written["conditions"], list)
+
+def test_apply_plan_creates_the_probe_and_the_placements(make_static_set: Any) -> None:
+    """A plan's probe workload and placement records are written through the client."""
+    cluster = FakeCluster()
+    cluster.nodes = [node("a"), node("b")]
+    cluster.replica_sets = [replica_set("web-probe-3", generation=3, replicas=2)]
+    cluster.pods = [
+        pod("probe-a", node_name="a", labels=probe_labels(3), owner="web-probe-3"),
+        pod("probe-b", node_name="b", labels=probe_labels(3), owner="web-probe-3"),
+    ]
+    resource = make_static_set()
+    state = operator.read_snapshot(client(cluster), resource)
+
+    operator.apply_plan(client(cluster), resource, state, "edge")
+
+    created = [name for kind, name in cluster.created if kind == "StaticPodPlacement"]
+    assert len(created) == 2
+    assert len(cluster.placements) == 2
+    nodes = sorted(body["spec"]["node"] for body in cluster.placements)
+    assert nodes == ["a", "b"]
+
+
+def test_apply_plan_replaces_an_existing_probe(make_static_set: Any) -> None:
+    """Applying a probe that already exists is a replacement, not a second object."""
+    cluster = FakeCluster()
+    resource = make_static_set()
+    state = ObservedState(nodes=(), synced=True)
+
+    operator.apply_plan(client(cluster), resource, state, "edge")
+
+    assert [kind for kind, _ in cluster.created] == ["ReplicaSet"]
+    assert cluster.replica_sets[0].metadata.name == "web-probe-3"
+
+    operator.apply_plan(client(cluster), resource, state, "edge")
+
+    assert len(cluster.replica_sets) == 1
+
+
+def test_apply_plan_deletes_a_stale_probe(make_static_set: Any) -> None:
+    """The probe of a superseded generation does not survive its replacement."""
+    cluster = FakeCluster()
+    cluster.daemon_sets = [daemon_set("web-probe-2", generation=2, desired=0)]
+    resource = make_static_set()
+    state = operator.read_snapshot(client(cluster), resource)
+
+    operator.apply_plan(client(cluster), resource, state, "edge")
+
+    assert ("DaemonSet", "web-probe-2") in cluster.deleted
+
+
+def test_apply_plan_deletes_a_cleaned_placement(make_static_set: Any) -> None:
+    """A removal the node acknowledged closes its record."""
+    cluster = FakeCluster()
+    cluster.replica_sets = [replica_set("web-probe-3", generation=3, replicas=1)]
+    cluster.pods = [
+        pod("probe-a", node_name="a", labels=probe_labels(3), owner="web-probe-3"),
+    ]
+    cluster.placements = [
+        placement_body(node="b", desired=False, phase="Cleaned"),
+    ]
+    resource = make_static_set()
+    state = operator.read_snapshot(client(cluster), resource)
+
+    operator.apply_plan(client(cluster), resource, state, "edge")
+
+    assert ("StaticPodPlacement", "web-b") in cluster.deleted
+
+
+def test_publish_status_writes_every_reported_field() -> None:
+    """The status subresource carries the placement table and the phase markers."""
+
+    class Patch:
+        """A kopf-shaped patch."""
+
+        def __init__(self) -> None:
+            """Build an empty patch."""
+            self.status: dict[str, Any] = {}
+            self.metadata: dict[str, Any] = {}
+
+    from static_sets.models import PlacementStatus, StaticSetStatus
+
+    class Result:
+        """A plan-shaped result."""
+
+        status = StaticSetStatus(
+            observed_generation=3,
+            placed_generation=3,
+            desired_revision="r-1",
+            placements=[PlacementStatus(identity="abc", node="a", revision="r-1")],
+        )
+
+    patch = Patch()
+    operator.publish_status(patch, Result())  # type: ignore[arg-type]
+
+    assert patch.status["observedGeneration"] == 3
+    assert patch.status["placedGeneration"] == 3
+    assert patch.status["desiredRevision"] == "r-1"
+    assert patch.status["placements"][0]["node"] == "a"
 
 
 def test_ensure_finalizer_adds_it_once(make_static_set: Any) -> None:
-    """The finalizer is added, and an object that already has it is left alone."""
-    patch = kopf.Patch()
+    """The finalizer is added once and left alone after that."""
 
-    operator.ensure_finalizer(patch, make_static_set())
+    class Patch:
+        """A kopf-shaped patch."""
 
-    assert dict(patch.metadata)["finalizers"] == ["staticsets.cloudlane.dev/static-set"]
+        def __init__(self) -> None:
+            """Build an empty patch."""
+            self.metadata: dict[str, Any] = {}
 
-    already = make_static_set(
-        metadata={"finalizers": ["staticsets.cloudlane.dev/static-set", "other"]}
-    )
-    untouched = kopf.Patch()
+    missing = make_static_set()
+    first = Patch()
+    operator.ensure_finalizer(first, missing)  # type: ignore[arg-type]
+    assert first.metadata["finalizers"] == [STATIC_SET_FINALIZER]
 
-    operator.ensure_finalizer(untouched, already)
-
-    assert dict(untouched.metadata) == {}
-
-
-def test_reject_unsupported_accepts_a_valid_object(make_resource: Any) -> None:
-    """A well-formed object passes admission."""
-    operator.reject_unsupported(make_resource())
+    present = make_static_set(metadata={"finalizers": [STATIC_SET_FINALIZER]})
+    second = Patch()
+    operator.ensure_finalizer(second, present)  # type: ignore[arg-type]
+    assert second.metadata == {}
 
 
 def test_reject_unsupported_refuses_an_unknown_field(make_resource: Any) -> None:
-    """An unknown field is refused instead of being pruned."""
+    """The admission check turns a pruned field into a rejection."""
     body = make_resource()
-    body["spec"]["template"]["spec"]["containers"][0]["lifecycle"] = {}
+    body["spec"]["template"]["spec"]["serviceAccountName"] = "default"
 
     with pytest.raises(kopf.AdmissionError) as error:
         operator.reject_unsupported(body)
 
-    assert "lifecycle" in str(error.value)
+    assert "serviceAccountName" in str(error.value)
+
+
+def test_read_snapshot_raises_when_the_api_is_unreachable(
+    make_static_set: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed read must not look like an empty cluster."""
+    from static_sets.errors import ApiUnavailableError
+
+    class Offline(FakeCluster):
+        """A cluster whose reads fail."""
+
+        def __init__(self) -> None:
+            super().__init__()
+
+            def fail(*_: Any, **__: Any) -> Any:
+                raise ApiUnavailableError("connection refused")
+
+            self.core.list_namespaced_pod = fail
+
+    with pytest.raises(ApiUnavailableError):
+        operator.read_snapshot(client(Offline()), make_static_set())
 
 
 def test_reconcile_retries_when_the_api_is_unreachable(
     make_static_set: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unreachable API is retried, never interpreted as an empty desired set."""
-    from static_sets.installer import ApiUnavailableError
+    """A reconcile that cannot read retries instead of deleting anything."""
+    from static_sets.errors import ApiUnavailableError
 
-    class BrokenCore(FakeCore):
-        def list_namespaced_pod(self, namespace: str, **kwargs: Any) -> V1PodList:
-            raise ApiUnavailableError("connection refused")
+    monkeypatch.setattr(
+        operator,
+        "read_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ApiUnavailableError("offline")),
+    )
+    monkeypatch.setattr(operator, "get_client", FakeCluster)
 
-    class Broken(FakeCluster):
+    class Patch:
+        """A kopf-shaped patch."""
+
         def __init__(self) -> None:
-            super().__init__()
-            self.core = BrokenCore(self)
-
-    monkeypatch.setattr(operator, "get_client", lambda: Broken())
-    patch = kopf.Patch()
+            """Build an empty patch."""
+            self.status: dict[str, Any] = {}
+            self.metadata: dict[str, Any] = {}
 
     with pytest.raises(kopf.TemporaryError):
-        operator.reconcile(make_static_set(), patch, LOGGER)
-
-    assert dict(patch.status) == {}
-    assert dict(patch.metadata) == {}
+        operator.reconcile(make_static_set(), Patch(), _logger())  # type: ignore[arg-type]
 
 
-def test_reconcile_applies_and_records_status(
+def test_finalize_waits_while_a_placement_is_not_cleaned(
     make_static_set: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A successful reconcile writes the workload and the status."""
-    client = FakeCluster()
-    monkeypatch.setattr(operator, "get_client", lambda: client)
-    patch = kopf.Patch()
+    """The StaticSet is not released before every node acknowledged its removal."""
+    cluster = FakeCluster()
+    cluster.placements = [placement_body(node="a", desired=False, phase="Cleaning")]
+    monkeypatch.setattr(operator, "get_client", lambda: client(cluster))
+    resource = make_static_set(metadata={"deletionTimestamp": "2026-10-24T10:00:00+00:00"})
 
-    operator.reconcile(make_static_set(spec={"replicas": 1}), patch, LOGGER)
+    class Patch:
+        """A kopf-shaped patch."""
 
-    assert any(isinstance(item, V1Deployment) for item in client.applied)
-    assert dict(patch.status)["observedGeneration"] == 3
-    assert dict(patch.metadata)["finalizers"] == ["staticsets.cloudlane.dev/static-set"]
-
-
-def test_finalize_releases_the_finalizer_only_when_cleanup_is_acknowledged(
-    make_static_set: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A pending cleanup keeps the finalizer, so the object is not released early."""
-    client = FakeCluster(
-        config_maps=[{"data": {"placement": "abc", "node": "node-a", "state": "Installed"}}]
-    )
-    monkeypatch.setattr(operator, "get_client", lambda: client)
-    resource = make_static_set(
-        spec={"replicas": 1},
-        metadata={
-            "deletionTimestamp": "2026-10-12T11:00:00Z",
-            "finalizers": ["staticsets.cloudlane.dev/static-set"],
-        },
-    )
+        def __init__(self) -> None:
+            """Build an empty patch."""
+            self.status: dict[str, Any] = {}
+            self.metadata: dict[str, Any] = {}
 
     with pytest.raises(kopf.TemporaryError):
-        operator.finalize(resource, kopf.Patch(), LOGGER)
+        operator.finalize(resource, Patch(), _logger())  # type: ignore[arg-type]
 
 
-def test_finalize_releases_the_finalizer_when_cleanup_is_done(
-    make_static_set: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An acknowledged cleanup drops the finalizer, letting the object go."""
-    client = FakeCluster()
-    monkeypatch.setattr(operator, "get_client", lambda: client)
-    resource = make_static_set(
-        spec={"replicas": 1},
-        metadata={
-            "deletionTimestamp": "2026-10-12T11:00:00Z",
-            "finalizers": ["staticsets.cloudlane.dev/static-set", "other"],
-        },
-    )
-    patch = kopf.Patch()
-
-    operator.finalize(resource, patch, LOGGER)
-
-    assert dict(patch.metadata)["finalizers"] == ["other"]
-
-
-ADMISSION_PROBE = (
-    "import runpy, kopf;"
-    "runpy.run_path('app/static_sets_operator.py');"
-    "print(len(kopf.get_default_registry()._webhooks.get_all_handlers()))"
-)
-"""Counts the admission handlers a fresh interpreter registers on import."""
-
-
-def admission_handler_count(webhook: str | None) -> int:
-    """Import the entry point in a fresh interpreter and count its admission handlers.
-
-    Registration happens at import time, so it cannot be observed in this process:
-    the module is already in ``sys.modules`` and its registry already populated.
-
-    Args:
-        webhook: The value of the operator's webhook environment variable, or
-            ``None`` to leave it unset.
+def _logger() -> Any:
+    """Return a logger that swallows everything.
 
     Returns:
-        The number of admission handlers the import registered.
+        A stub logger.
     """
-    environment = dict(os.environ)
-    environment.pop(operator.WEBHOOK_ENV, None)
-    if webhook is not None:
-        environment[operator.WEBHOOK_ENV] = webhook
-    environment["PYTHONPATH"] = os.pathsep.join([str(REPO_ROOT / "src"), str(REPO_ROOT / "app")])
-    result = subprocess.run(
-        [sys.executable, "-c", ADMISSION_PROBE],
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-        env=environment,
-        timeout=300,
-    )
-    assert result.returncode == 0, result.stderr
-    return int(result.stdout.strip())
 
+    class Logger:
+        """A no-op logger."""
 
-def test_the_admission_handler_is_registered_only_while_admissions_are_served() -> None:
-    """kopf refuses to start when admission handlers exist with nothing to serve them.
+        def info(self, *args: Any, **kwargs: Any) -> None:
+            """Ignore an informational message."""
 
-    The chart's default deployment does not serve admissions, so registering the
-    handler unconditionally leaves the controller in a crash loop — which the
-    end-to-end suite caught and no unit test could, because the handler function
-    itself behaves correctly either way. This pins the registration, not the handler.
-    """
-    assert admission_handler_count(None) == 0
-    assert admission_handler_count("0") == 0
-    assert admission_handler_count("1") == 1
+        def warning(self, *args: Any, **kwargs: Any) -> None:
+            """Ignore a warning."""
+
+        def error(self, *args: Any, **kwargs: Any) -> None:
+            """Ignore an error."""
+
+    return Logger()

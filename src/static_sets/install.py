@@ -9,15 +9,21 @@ that an interruption at any point leaves a consistent state:
 3. the revision's configuration files are written and ``fsync``-ed into an
    immutable, revision-named directory outside kubelet's watched path;
 4. the manifest is written to a temporary file next to kubelet's path and then
-   renamed onto the final name, so kubelet sees either the old revision or the new
+   renamed onto its final name, so kubelet sees either the old revision or the new
    one and never a half-written file;
 5. the ownership record is updated to name the active revision;
 6. obsolete revisions are pruned, never the active one.
 
+A static Pod's manifest is named after the revision it renders
+(``<set>-<identity>-<revision>.yaml``), so a ``Surge`` rollout can leave the previous
+revision's manifest in place until the new one is running. The record names both:
+``revision`` is the active one, ``retiring`` the one still on disk whose removal is
+pending.
+
 Nothing here deletes anything it does not own. Every destructive operation first
 checks the ownership record, the StaticSet UID and the generation, which is what
-stops a replaced installer or a late cleanup worker from destroying the workload a
-successor already published.
+stops a late or stale manager from destroying the workload a successor already
+published.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from static_sets.errors import InstallationError, OwnershipError, PathSecurityError
-from static_sets.naming import manifest_filename
+from static_sets.naming import manifest_filename, static_pod_name
 from static_sets.paths import (
     assert_within,
     atomic_write,
@@ -49,9 +55,11 @@ __all__ = [
     "PlacementLayout",
     "claim_placement",
     "install_revision",
+    "acknowledge",
     "read_intent",
     "read_record",
     "remove_workload",
+    "retire_revision",
     "verify_owner",
     "write_intent",
 ]
@@ -87,6 +95,14 @@ class OwnershipRecord(BaseModel):
     node: str = Field(description="The node this placement lives on.")
     generation: int = Field(description="The generation the record was written for.")
     revision: str | None = Field(default=None, description="The active revision, if any.")
+    retiring: str | None = Field(
+        default=None,
+        description=(
+            "The previous revision, whose manifest is still installed while a newer one "
+            "proves it can run. Only set between a Surge installation and the retirement "
+            "that follows it."
+        ),
+    )
     history: list[str] = Field(
         default_factory=list,
         description=(
@@ -160,7 +176,21 @@ class PlacementLayout:
     @property
     def manifest_path(self) -> str:
         """The manifest's path inside kubelet's watched directory."""
-        return f"{self.static_pod_path.rstrip('/')}/{manifest_filename(self.pod_name)}"
+        return self.manifest_path_for(self.pod_name)
+
+    def manifest_path_for(self, pod_name: str) -> str:
+        """Return the manifest path kubelet reads for one static Pod name.
+
+        The name carries the revision, so the previous revision's file and the new
+        one's are different paths — which is what a ``Surge`` rollout needs.
+
+        Args:
+            pod_name: The static Pod's name.
+
+        Returns:
+            The absolute manifest path.
+        """
+        return f"{self.static_pod_path.rstrip('/')}/{manifest_filename(pod_name)}"
 
     def revision_dir(self, revision: str) -> str:
         """Return the directory that holds one revision's content.
@@ -273,6 +303,40 @@ def write_intent(layout: PlacementLayout, intent: CleanupIntent) -> None:
     atomic_write(Path(layout.intent_path), payload, mode=RECORD_MODE, directory_mode=DIRECTORY_MODE)
 
 
+def acknowledge(
+    layout: PlacementLayout,
+    *,
+    owner: str,
+    now: str,
+) -> OwnershipRecord:
+    """Mark a placement's local state as the installed one.
+
+    A pass that finds the wanted revision already installed has nothing to write on the
+    host, but it has already claimed the placement — which records it as "installing".
+    This is what puts it back, without rewriting the revision directory of a workload
+    that is already correct.
+
+    Args:
+        layout: The placement's layout.
+        owner: The calling manager's instance identity.
+        now: The current time, RFC 3339.
+
+    Returns:
+        The record now in force.
+
+    Raises:
+        OwnershipError: If this process is not the placement's owner.
+    """
+    record = verify_owner(layout, owner)
+    _write_record(
+        layout,
+        record.model_copy(
+            update={"state": "Installed", "pod_name": layout.pod_name, "updated_at": now}
+        ),
+    )
+    return record
+
+
 def verify_owner(layout: PlacementLayout, owner: str) -> OwnershipRecord:
     """Assert that this process is the placement's current owner.
 
@@ -359,6 +423,7 @@ def claim_placement(
         node=node,
         generation=generation,
         revision=existing.revision if existing is not None else None,
+        retiring=existing.retiring if existing is not None else None,
         history=list(existing.history) if existing is not None else [],
         state="Installing",
         owner=owner,
@@ -379,6 +444,7 @@ def install_revision(
     retained_revisions: int,
     labels: dict[str, str],
     annotations: dict[str, str],
+    retiring: str | None = None,
 ) -> InstallResult:
     """Install a compiled revision durably and make it the active manifest.
 
@@ -388,15 +454,18 @@ def install_revision(
     the previously active revision intact.
 
     Args:
-        layout: The placement's layout.
+        layout: The placement's layout, naming the *new* revision's static Pod.
         compiled: The compiled workload.
         namespace: The namespace the mirror Pod should appear in.
         generation: The generation this revision was computed for.
-        owner: The calling installer's instance identity.
+        owner: The calling manager's instance identity.
         now: The current time, RFC 3339.
         retained_revisions: How many revision directories to keep, newest first.
         labels: Provenance labels for the static Pod.
         annotations: Provenance annotations for the static Pod.
+        retiring: The revision whose manifest must stay installed alongside this one,
+            or ``None``. A ``Surge`` rollout passes the active revision here and
+            retires it once the new Pod is observed running.
 
     Returns:
         The installation result.
@@ -444,7 +513,9 @@ def install_revision(
         layout,
         record.model_copy(
             update={
+                "pod_name": layout.pod_name,
                 "revision": revision,
+                "retiring": retiring if retiring != revision else None,
                 "history": new_history,
                 "state": "Installed",
                 "updated_at": now,
@@ -461,6 +532,48 @@ def install_revision(
         warnings=compiled.warnings,
         retained=retained,
     )
+
+
+def retire_revision(
+    layout: PlacementLayout,
+    revision: str,
+    *,
+    static_set: str,
+    owner: str,
+    now: str,
+) -> bool:
+    """Remove the manifest of one revision, leaving the placement intact.
+
+    This is what completes a ``Surge`` rollout: the new revision is installed first,
+    and the previous one is removed once its successor is running. It is also how a
+    ``Recreate`` rollout makes room, before the new manifest is written.
+
+    Args:
+        layout: The placement's layout.
+        revision: The revision whose manifest should be removed.
+        static_set: The StaticSet's name, needed to derive the manifest's file name.
+        owner: The calling manager's instance identity.
+        now: The current time, RFC 3339.
+
+    Returns:
+        Whether a manifest file was actually removed.
+
+    Raises:
+        OwnershipError: If this process is not the placement's owner.
+        PathSecurityError: If the manifest is not inside kubelet's static Pod path,
+            or is a symbolic link.
+    """
+    record = verify_owner(layout, owner)
+    pod_name = static_pod_name(static_set, layout.identity, revision)
+    removed = _remove_manifest_for(layout, pod_name)
+    update: dict[str, object] = {"updated_at": now}
+    if record.retiring == revision:
+        update["retiring"] = None
+    if record.revision == revision:
+        update["revision"] = None
+        update["pod_name"] = layout.pod_name
+    _write_record(layout, record.model_copy(update=update))
+    return removed
 
 
 def prune_revisions(
@@ -562,7 +675,14 @@ def remove_workload(
             f"the cleanup intent is for generation {intent.generation}"
         )
 
-    _remove_manifest(layout)
+    # The active manifest is named in the record, which is the authority for what was
+    # written. The retiring one is derived, because the record only keeps its revision
+    # and the naming convention is fixed.
+    _remove_manifest_for(layout, record.pod_name)
+    if record.retiring:
+        _remove_manifest_for(
+            layout, static_pod_name(record.static_set, layout.identity, record.retiring)
+        )
     removed_configuration = False
     if intent.remove_configuration and terminated:
         revisions = Path(layout.revisions_dir)
@@ -576,6 +696,7 @@ def remove_workload(
         record.model_copy(
             update={
                 "revision": None,
+                "retiring": None,
                 "history": [],
                 "state": "Removed",
                 "updated_at": intent.requested_at,
@@ -601,23 +722,29 @@ def remove_workload(
     )
 
 
-def _remove_manifest(layout: PlacementLayout) -> None:
-    """Remove the active manifest, tolerating its absence.
+def _remove_manifest_for(layout: PlacementLayout, pod_name: str) -> bool:
+    """Remove one static Pod's manifest, tolerating its absence.
 
     Args:
         layout: The placement's layout.
+        pod_name: The static Pod whose manifest should be removed.
+
+    Returns:
+        Whether a file was removed.
 
     Raises:
         PathSecurityError: If the manifest is not inside kubelet's static Pod path,
             or is a symbolic link.
     """
-    manifest = Path(layout.manifest_path)
+    manifest = Path(layout.manifest_path_for(pod_name))
     assert_within(Path(layout.static_pod_path), manifest)
     if manifest.is_symlink():
         raise PathSecurityError(f"{manifest} is a symbolic link; refusing to remove it")
     if manifest.exists():
         manifest.unlink()
         _fsync(manifest.parent)
+        return True
+    return False
 
 
 def _write_revision_file(revision_dir: str, relative: str, content: bytes, mode: int) -> None:

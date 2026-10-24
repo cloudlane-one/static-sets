@@ -1,8 +1,8 @@
 """The shipped manifests: CRD drift, samples, chart rendering and the Dockerfile.
 
-The CRD test is the important one: the document in the chart is generated from the
-Pydantic models, so re-rendering it here proves the committed file still describes
-the type the operator actually reconciles.
+The CRD test is the important one: the documents in the chart are generated from the
+Pydantic models, so re-rendering them here proves the committed files still describe
+the types the operator actually reconciles.
 """
 
 from __future__ import annotations
@@ -18,9 +18,11 @@ import yaml
 from based_operators import crd_yaml
 
 from static_sets.models import StaticSet
+from static_sets.placements import StaticPodPlacement
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHART = REPO_ROOT / "deploy" / "helm" / "static-sets"
+CRDS = CHART / "crds"
 SAMPLES = REPO_ROOT / "deploy" / "samples"
 DOCKERFILE = REPO_ROOT / "deploy" / "Dockerfile"
 
@@ -45,14 +47,32 @@ def documents(path: Path) -> list[dict[str, Any]]:
     return [item for item in yaml.safe_load_all(path.read_text(encoding="utf-8")) if item]
 
 
-def test_the_committed_crd_matches_the_models() -> None:
-    """The CRD in the chart is exactly what the models render."""
-    committed = documents(CHART / "crds" / "staticsets.staticsets.cloudlane.dev.yaml")
+@pytest.mark.parametrize(
+    ("resource", "name"),
+    [
+        (StaticSet, "staticsets.staticsets.cloudlane.dev.yaml"),
+        (StaticPodPlacement, "staticpodplacements.staticsets.cloudlane.dev.yaml"),
+    ],
+    ids=lambda value: getattr(value, "__name__", str(value)),
+)
+def test_every_committed_crd_matches_its_model(resource: Any, name: str) -> None:
+    """Each CRD in the chart is exactly what its model renders."""
+    committed = documents(CRDS / name)
 
     assert len(committed) == 1
     assert yaml.safe_dump(committed[0], sort_keys=True) == yaml.safe_dump(
-        yaml.safe_load(crd_yaml(StaticSet)), sort_keys=True
+        yaml.safe_load(crd_yaml(resource)), sort_keys=True
     )
+
+
+def test_the_chart_ships_a_crd_for_every_resource_the_operator_serves() -> None:
+    """A missing CRD is an operator that cannot cache what it watches."""
+    names = {path.name for path in CRDS.glob("*.yaml")}
+
+    assert names == {
+        "staticsets.staticsets.cloudlane.dev.yaml",
+        "staticpodplacements.staticsets.cloudlane.dev.yaml",
+    }
 
 
 @pytest.mark.parametrize("sample", sorted(SAMPLES.glob("*.yaml")), ids=lambda path: path.name)
@@ -76,12 +96,12 @@ def test_the_samples_cover_both_modes_and_both_configuration_kinds() -> None:
     assert any(item.get("kind") == "Secret" for item in resources)
 
 
-def test_samples_use_the_namespace_the_chart_watches() -> None:
-    """A sample that lands outside the watched namespace would never reconcile."""
+def test_samples_do_not_carry_installer_settings() -> None:
+    """Where the static Pod is written is the node manager's configuration now."""
     for sample in sorted(SAMPLES.glob("*.yaml")):
         for document in documents(sample):
-            namespace = (document.get("metadata") or {}).get("namespace")
-            assert namespace == "static-sets", f"{sample.name} targets {namespace}"
+            if document.get("kind") == "StaticSet":
+                assert "installer" not in document["spec"], sample.name
 
 
 @requires_helm
@@ -99,18 +119,32 @@ def test_chart_lints() -> None:
 
 
 @requires_helm
-def test_chart_renders_the_controller_and_its_namespaced_permissions() -> None:
-    """The default render contains the controller, both identities and its Roles."""
+def test_chart_renders_the_controller_the_manager_and_their_permissions() -> None:
+    """The default render contains both processes, both identities and two cluster roles."""
     templates = render_chart()
 
     kinds = [document["kind"] for document in templates]
     assert kinds.count("Deployment") == 1
+    assert kinds.count("DaemonSet") == 1
+    assert kinds.count("RuntimeClass") == 1
     assert kinds.count("ServiceAccount") == 2
-    assert "Role" in kinds
-    assert "RoleBinding" in kinds
     assert "ClusterRole" in kinds
+    assert "ClusterRoleBinding" in kinds
+    # Nothing is namespaced any more: a StaticSet may live in any namespace, and the
+    # manager serves placements chosen by node, not by namespace.
+    assert "Role" not in kinds
+    assert "RoleBinding" not in kinds
     assert "Service" not in kinds
     assert "Certificate" not in kinds
+
+
+@requires_helm
+def test_the_controller_is_cluster_wide() -> None:
+    """A namespaced watch would leave every StaticSet outside it unreconciled."""
+    deployment = _document(render_chart(), "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+
+    assert not any(str(argument).startswith("--namespace") for argument in container["command"])
 
 
 @requires_helm
@@ -123,6 +157,73 @@ def test_chart_controller_needs_no_privilege() -> None:
     assert pod["containers"][0]["securityContext"]["runAsNonRoot"] is True
     assert pod["containers"][0]["securityContext"]["capabilities"]["drop"] == ["ALL"]
     assert pod["containers"][0]["command"][0] == "kopf"
+    assert "app/static_sets_operator.py" in pod["containers"][0]["command"]
+
+
+@requires_helm
+def test_the_manager_runs_once_per_node_with_exactly_two_host_mounts() -> None:
+    """One Pod per node, kubelet's directory and the bundle, and nothing else."""
+    daemon_set = _document(render_chart(), "DaemonSet")
+    pod = daemon_set["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+
+    assert "app/static_pod_manager.py" in container["command"]
+    assert [volume["name"] for volume in pod["volumes"]] == ["static-pod-path", "bundle"]
+    assert {volume["hostPath"]["type"] for volume in pod["volumes"]} == {
+        "Directory",
+        "DirectoryOrCreate",
+    }
+    assert [mount["mountPath"] for mount in container["volumeMounts"]] == [
+        "/etc/kubernetes/manifests",
+        "/var/lib/static-sets",
+    ]
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+
+
+@requires_helm
+def test_the_manager_learns_its_node_from_the_downward_api() -> None:
+    """The manager is only correct if it knows which host it is responsible for."""
+    daemon_set = _document(render_chart(), "DaemonSet")
+    container = daemon_set["spec"]["template"]["spec"]["containers"][0]
+    environment = {item["name"]: item for item in container["env"]}
+
+    assert environment["STATIC_SETS_NODE"]["valueFrom"]["fieldRef"]["fieldPath"] == "spec.nodeName"
+    assert (
+        environment["STATIC_SETS_MANAGER_POD"]["valueFrom"]["fieldRef"]["fieldPath"]
+        == "metadata.name"
+    )
+    assert environment["STATIC_SETS_STATIC_POD_PATH"]["value"] == "/etc/kubernetes/manifests"
+
+
+@requires_helm
+def test_the_manager_tolerates_every_taint_by_default() -> None:
+    """A placement can be asked for on any node, so the manager must be able to run there."""
+    daemon_set = _document(render_chart(), "DaemonSet")
+
+    assert daemon_set["spec"]["template"]["spec"]["tolerations"] == [{"operator": "Exists"}]
+
+
+@requires_helm
+def test_the_chart_installs_the_placeholder_runtime_class() -> None:
+    """The probe's runtime class must exist and must have a handler no CRI implements."""
+    rendered = render_chart()
+    runtime_class = _document(rendered, "RuntimeClass")
+    deployment = _document(rendered, "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    environment = {item["name"]: item.get("value") for item in container["env"]}
+
+    assert runtime_class["handler"] == runtime_class["metadata"]["name"]
+    assert environment["STATIC_SETS_PROBE_RUNTIME_CLASS"] == runtime_class["metadata"]["name"]
+
+
+@requires_helm
+def test_the_runtime_class_can_be_left_to_an_administrator() -> None:
+    """A cluster that manages its runtime classes itself renders no RuntimeClass."""
+    rendered = render_chart("probe.createRuntimeClass=false")
+
+    assert "RuntimeClass" not in [document["kind"] for document in rendered]
 
 
 @requires_helm
@@ -155,21 +256,64 @@ def test_chart_disables_the_webhook_by_default() -> None:
 
 
 @requires_helm
-def test_chart_watches_the_release_namespace_by_default() -> None:
-    """The controller is scoped to one namespace, which is what makes Roles enough."""
-    deployment = _document(render_chart(), "Deployment")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
+def test_the_manager_account_is_one_the_chart_creates() -> None:
+    """A Pod naming a ServiceAccount that does not exist is refused at admission."""
+    rendered = render_chart()
+    accounts = {
+        document["metadata"]["name"]
+        for document in rendered
+        if document["kind"] == "ServiceAccount"
+    }
+    daemon_set = _document(rendered, "DaemonSet")
+    pod = daemon_set["spec"]["template"]["spec"]
 
-    assert "--namespace=static-sets" in container["command"]
+    assert pod["serviceAccountName"] in accounts
+    assert (
+        pod["serviceAccountName"]
+        != _document(rendered, "Deployment")["spec"]["template"]["spec"]["serviceAccountName"]
+    )
 
 
 @requires_helm
-def test_chart_watchers_can_be_pointed_elsewhere() -> None:
-    """The watched namespace is a value, not a hard-coded default."""
-    deployment = _document(render_chart("watchNamespace=edge"), "Deployment")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
+def test_both_processes_may_read_the_placement_records() -> None:
+    """The controller writes them and the manager reports on them."""
+    rendered = render_chart()
+    roles = {
+        document["metadata"]["name"]: document
+        for document in rendered
+        if document["kind"] == "ClusterRole"
+    }
+    controller = next(role for name, role in roles.items() if name.endswith("-controller"))
+    manager = next(role for name, role in roles.items() if name.endswith("-manager"))
 
-    assert "--namespace=edge" in container["command"]
+    def resources(role: dict[str, Any]) -> set[str]:
+        return {item for rule in role["rules"] for item in rule.get("resources", [])}
+
+    assert "staticpodplacements" in resources(controller)
+    assert "staticpodplacements/status" in resources(manager)
+    assert "staticsets" in resources(manager)
+    # The manager never writes the one thing that decides where a placement goes.
+    for rule in manager["rules"]:
+        if "staticpodplacements" in rule.get("resources", []):
+            assert "update" in rule["verbs"] or "patch" in rule["verbs"]
+            assert "create" not in rule["verbs"]
+            assert "delete" not in rule["verbs"]
+
+
+@requires_helm
+def test_chart_grants_the_namespace_read_kopf_needs() -> None:
+    """kopf manages a watch per namespace, so it reads them."""
+    rendered = render_chart()
+    roles = [
+        document
+        for document in rendered
+        if document["kind"] == "ClusterRole"
+        and any("namespaces" in rule.get("resources", []) for rule in document.get("rules", []))
+    ]
+
+    assert len(roles) == 1
+    rule = next(rule for rule in roles[0]["rules"] if "namespaces" in rule.get("resources", []))
+    assert set(rule["verbs"]) >= {"get", "list", "watch"}
 
 
 def render_chart(*settings: str) -> list[dict[str, Any]]:
@@ -219,6 +363,7 @@ def test_the_image_builds_the_project_and_runs_the_entry_point() -> None:
     assert "USER 65532" in content
     assert "--privileged" not in content
     assert (REPO_ROOT / "app" / "static_sets_operator.py").is_file()
+    assert (REPO_ROOT / "app" / "static_pod_manager.py").is_file()
 
 
 def test_every_dockerfile_references_an_existing_entry_point() -> None:
@@ -246,7 +391,7 @@ def test_every_dockerfile_references_an_existing_entry_point() -> None:
 def test_the_shipped_image_carries_no_build_tooling() -> None:
     """git and a compiler stay in the builder stage, out of the node-facing image.
 
-    An installer Pod runs as root with the manifest directory mounted, so tooling that
+    The manager runs as root with kubelet's manifest directory mounted, so tooling that
     is only needed to fetch a Git-referenced dependency must not survive into it.
     """
     content = DOCKERFILE.read_text(encoding="utf-8")
@@ -266,59 +411,3 @@ def test_dockerignore_excludes_build_output() -> None:
     assert ".venv/" in ignored
     assert "build/" in ignored
     assert "dist/" in ignored
-
-
-def test_the_operator_is_told_which_installer_account_the_chart_created() -> None:
-    """The installer workload runs as an account the chart actually creates.
-
-    A Pod that names a ServiceAccount which does not exist is refused at admission,
-    so if the chart tells the operator a different name than it provisions — or tells
-    it nothing at all — the installers can never start. This is the cross-check
-    between what the chart creates and what the operator is told to use.
-    """
-    rendered = render_chart()
-    accounts = {
-        document["metadata"]["name"]
-        for document in rendered
-        if document["kind"] == "ServiceAccount"
-    }
-    container = _document(rendered, "Deployment")["spec"]["template"]["spec"]["containers"][0]
-    environment = {item["name"]: item.get("value") for item in container["env"]}
-
-    assert environment["STATIC_SETS_INSTALLER_SERVICE_ACCOUNT"] in accounts
-
-
-def test_the_installer_account_is_the_one_the_role_is_bound_to() -> None:
-    """Whatever the operator is told to use must carry the installer Role."""
-    rendered = render_chart()
-    container = _document(rendered, "Deployment")["spec"]["template"]["spec"]["containers"][0]
-    environment = {item["name"]: item.get("value") for item in container["env"]}
-    installer = environment["STATIC_SETS_INSTALLER_SERVICE_ACCOUNT"]
-    bindings = [
-        document
-        for document in rendered
-        if document["kind"] == "RoleBinding" and document["metadata"]["name"].endswith("-installer")
-    ]
-
-    assert len(bindings) == 1
-    subjects = bindings[0]["subjects"]
-    assert [subject["name"] for subject in subjects] == [installer]
-
-
-def test_chart_grants_the_namespace_read_kopf_needs() -> None:
-    """kopf manages a watch per namespace, so it reads them.
-
-    Without this rule the controller retries the lookup, fails, and restarts its
-    observer: the based-operators chart ships the same rule for the same reason.
-    """
-    rendered = render_chart()
-    roles = [
-        document
-        for document in rendered
-        if document["kind"] == "ClusterRole"
-        and any("namespaces" in rule.get("resources", []) for rule in document.get("rules", []))
-    ]
-
-    assert len(roles) == 1
-    rule = next(rule for rule in roles[0]["rules"] if "namespaces" in rule.get("resources", []))
-    assert set(rule["verbs"]) >= {"get", "list", "watch"}

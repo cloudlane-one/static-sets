@@ -1,9 +1,12 @@
 # Defaults of the StaticSet operator chart.
 #
-# The operator runs in one namespace and manages StaticSets in that same
-# namespace, so every permission it needs is namespaced. The only cluster-scoped
-# access it asks for is reading Nodes, which is what placement and reachability
-# reporting need.
+# The chart installs three things: the controller (one cluster-wide Deployment), the
+# node manager (a DaemonSet, one Pod per node, which writes the static Pods), and the
+# placeholder RuntimeClass the scheduling probes ask for.
+#
+# The controller is cluster-wide because a StaticSet may live in any namespace: the
+# node that has to serve a placement is named by the placement, not by where the
+# StaticSet happens to be.
 
 replicaCount: 1
 
@@ -17,10 +20,48 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-# The namespace the operator watches. Defaults to the release namespace.
-# StaticSets must live in this namespace, because that is where the installer
-# Pods the operator creates, and the resources they acknowledge through, live.
-watchNamespace: ""
+# The node manager. It runs once per node, mounts kubelet's static Pod directory and
+# the bundle directory, and serves every StaticSet placed on its node, in every
+# namespace. Its host access is the same for every StaticSet: a StaticSet cannot widen
+# it.
+manager:
+  # Defaults to the operator image: the two entry points share the library, and
+  # shipping them together removes any chance of their revision hashing or ownership
+  # protocol disagreeing.
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: ""
+  # kubelet's staticPodPath on the node.
+  staticPodPath: /etc/kubernetes/manifests
+  # The persistent directory the manager owns: ownership records, revision
+  # directories and materialized configuration.
+  bundleDir: /var/lib/static-sets
+  serviceAccountName: ""
+  updateStrategy: RollingUpdate
+  resources: {}
+  # A placement can be asked for on any node, so the manager has to run on any node,
+  # including a cordoned or tainted one.
+  tolerations:
+    - operator: Exists
+  nodeSelector: {}
+  podLabels: {}
+  podAnnotations: {}
+
+# The scheduling probe.
+#
+# The controller asks the Kubernetes scheduler where a workload should run by creating
+# a ReplicaSet or a DaemonSet whose Pods carry the workload's resource requests and the
+# StaticSet's placement rules. Those Pods must be scheduled and must never execute,
+# which is what this RuntimeClass is for: no container runtime implements the handler,
+# so kubelet binds the Pod, fails to create its sandbox, and starts nothing.
+#
+# It is created by the chart rather than by the operator because it is cluster-scoped
+# and carries no per-StaticSet content. It must not be renamed without also changing
+# the controller's STATIC_SETS_PROBE_RUNTIME_CLASS.
+probe:
+  runtimeClassName: staticsets-scheduling-probe
+  createRuntimeClass: true
 
 # Strict admission validation of StaticSets.
 #
@@ -39,19 +80,13 @@ webhook:
       name: ""
       kind: Issuer
 
-# The ServiceAccount the installer Pods run as. Defaults to
-# <fullname>-installer; it is the identity that writes static Pod manifests and
-# materialized configuration on a node.
-installer:
-  serviceAccountName: ""
-
 rbac:
   create: true
 
 podLabels: {}
 podAnnotations: {}
 
-# The operator only ever reconciles through the API; it mounts no host path and
+# The controller only ever reconciles through the API; it mounts no host path and
 # needs no privilege.
 securityContext:
   allowPrivilegeEscalation: false

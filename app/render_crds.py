@@ -16,9 +16,11 @@
 # %% [markdown]
 # # Render the CustomResourceDefinition
 #
-# The CRD is generated from the Pydantic models, so it can never drift from the
-# type the operator actually reconciles. This command writes the rendered document
-# into the Helm chart's `crds/` directory, which is where Helm installs CRDs from:
+# The CRDs are generated from the Pydantic models, so they can never drift from the
+# types the operator actually reconciles. There are two: the `StaticSet` a user
+# writes, and the `StaticPodPlacement` the controller writes and each node's manager
+# fills in. The command writes both rendered documents into the Helm chart's `crds/`
+# directory, which is where Helm installs CRDs from:
 #
 # ```shell
 # uv run app/render_crds.py
@@ -40,6 +42,7 @@ import typer
 from based_operators import crd_yaml
 
 from static_sets.models import StaticSet
+from static_sets.placements import StaticPodPlacement
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 """The repository root, so the script works from any working directory."""
@@ -48,22 +51,31 @@ CRDS_DIR = REPO_ROOT / "deploy" / "helm" / "static-sets" / "crds"
 """The chart directory Helm installs CustomResourceDefinitions from."""
 
 
-def render() -> Path:
-    """Write the StaticSet CRD into the chart.
+RESOURCES = (StaticSet, StaticPodPlacement)
+"""The custom resources the chart has to install."""
+
+
+def render() -> list[Path]:
+    """Write every resource's CRD into the chart.
 
     Returns:
-        The path that was written.
+        The paths that were written.
     """
-    config = StaticSet._require_resource_config()
     CRDS_DIR.mkdir(parents=True, exist_ok=True)
-    target = CRDS_DIR / f"{config.crd_name}.yaml"
-    target.write_text(crd_yaml(StaticSet), encoding="utf-8", newline="\n")
-    return target
+    written: list[Path] = []
+    for resource in RESOURCES:
+        config = resource._require_resource_config()
+        target = CRDS_DIR / f"{config.crd_name}.yaml"
+        target.write_text(crd_yaml(resource), encoding="utf-8", newline="\n")
+        written.append(target)
+    return written
 
 
 app = typer.Typer(
     name="render-crds",
-    help="Render the StaticSet CustomResourceDefinition into the Helm chart.",
+    help=(
+        "Render the StaticSet and StaticPodPlacement CustomResourceDefinitions into the Helm chart."
+    ),
     add_completion=False,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -72,9 +84,9 @@ app = typer.Typer(
 
 @app.command()
 def render_crd() -> None:
-    """Write the CRD generated from the models into the chart's crds/ directory."""
-    target = render()
-    typer.echo(f"wrote {target.relative_to(REPO_ROOT).as_posix()}")
+    """Write the CRDs generated from the models into the chart's crds/ directory."""
+    for target in render():
+        typer.echo(f"wrote {target.relative_to(REPO_ROOT).as_posix()}")
 
 
 # %%
