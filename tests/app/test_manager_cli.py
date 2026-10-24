@@ -68,10 +68,10 @@ class FakeApi:
         self._check()
         return None
 
-    def get_pod(self, namespace: str, name: str) -> MirrorPod | None:
+    def get_mirror_pods(self, namespace: str, placement: str) -> tuple[MirrorPod, ...]:
         """Return no mirror Pod: kubelet has not published one in this fake."""
         self._check()
-        return None
+        return ()
 
     def _check(self) -> None:
         """Fail the way the client fails when the API is unreachable."""

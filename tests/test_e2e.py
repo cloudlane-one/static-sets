@@ -11,10 +11,10 @@ reachable through ``kubectl``; it additionally needs ``docker`` and ``helm``.
 Two deliberate choices:
 
 * the workload is pinned to one node through ``spec.placement.nodeSelector``, so the
-  suite knows which kubelet to look at and cannot place a disposable workload on a
-  machine it does not mean to touch. The manifest goes into that node's real
-  ``staticPodPath``, which is what makes the mirror Pod appear — the proof that
-  kubelet accepted the file;
+  suite knows which kubelet to look at. The manifest goes into that node's real
+  ``staticPodPath`` (override it with ``STATIC_SETS_STATIC_POD_PATH`` on k3s), which is
+  what makes the mirror Pod appear — the proof that kubelet accepted the file. The
+  workload is a sleeping container named after the run, and the suite removes it;
 * the workload is the operator image itself, running ``sleep``. It is already present
   on every node because the manager DaemonSet pulled it, so the suite needs no registry
   and no particular network access, and a static Pod that must survive without the API
@@ -66,8 +66,14 @@ KIND = shutil.which("kind")
 DOCKER = shutil.which("docker")
 HELM = shutil.which("helm")
 
-STATIC_POD_PATH = "/etc/kubernetes/manifests"
-"""kubelet's own ``staticPodPath``: the suite installs for real."""
+STATIC_POD_PATH = os.environ.get("STATIC_SETS_STATIC_POD_PATH", "/etc/kubernetes/manifests")
+"""kubelet's own ``staticPodPath``: the suite installs for real.
+
+The default is what kubeadm and kind configure. k3s uses
+``/var/lib/rancher/k3s/agent/pod-manifests``; override it with
+``STATIC_SETS_STATIC_POD_PATH`` rather than editing the suite. Read the real value from
+the node with
+``kubectl get --raw /api/v1/nodes/<node>/proxy/configz``."""
 
 BUNDLE_DIR = "/var/lib/static-sets"
 """The persistent bundle directory the manager owns."""
@@ -390,21 +396,35 @@ def _condition(payload: dict[str, Any] | None, condition_type: str) -> dict[str,
     return next((item for item in conditions if item.get("type") == condition_type), None)
 
 
-def _mirror_pod(namespace: str, pod_name: str) -> dict[str, Any] | None:
-    """Return the mirror Pod kubelet published for a static Pod.
+def _mirror_for(namespace: str, static_set: str) -> dict[str, Any] | None:
+    """Return the mirror Pod kubelet published for one StaticSet.
+
+    It is found by label, not by name: kubelet registers a static Pod as
+    ``<metadata.name>-<node name>``, so the name in the manifest is not the name of the
+    object it publishes. The suite asserts that mismatch below rather than papering over
+    it — it is the reason the manager must never look a mirror up by name.
 
     Args:
         namespace: The namespace under test.
-        pod_name: The static Pod's name.
+        static_set: The StaticSet's name.
 
     Returns:
         The Pod, or ``None`` when kubelet has not published one.
     """
-    payload = _json("get", "pod", pod_name, "-n", namespace)
-    annotations = ((payload or {}).get("metadata") or {}).get("annotations") or {}
-    if "kubernetes.io/config.mirror" not in annotations:
-        return None
-    return payload
+    for pod in _items(
+        _json(
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            f"staticsets.cloudlane.dev/set={static_set}",
+        )
+    ):
+        annotations = (pod.get("metadata") or {}).get("annotations") or {}
+        if "kubernetes.io/config.mirror" in annotations:
+            return pod
+    return None
 
 
 def _current_context() -> str:
@@ -513,8 +533,7 @@ def deployed() -> Iterator[dict[str, Any]]:
     image = f"static-sets-e2e:{uuid.uuid4().hex[:10]}"
 
     _kubectl("create", "namespace", namespace)
-    for path in CRDS.values():
-        _kubectl("apply", "-f", str(path))
+    _ensure_crds()
     _run("docker", "build", "-f", "deploy/Dockerfile", "-t", image, ".", timeout=1800)
     _make_image_visible(image)
     _run(
@@ -545,6 +564,7 @@ def deployed() -> Iterator[dict[str, Any]]:
             "node": _worker_node(),
         }
     finally:
+        _delete_static_sets(namespace)
         _run("helm", "uninstall", release, "--namespace", namespace, check=False)
         # The CRDs go before the namespace. Removing them removes every StaticSet and
         # placement with them, finalizers included, so an object whose cleanup never
@@ -555,6 +575,56 @@ def deployed() -> Iterator[dict[str, Any]]:
             "delete", "namespace", namespace, "--ignore-not-found", "--wait=false", check=False
         )
         _run("docker", "rmi", "-f", image, check=False)
+
+
+def _ensure_crds() -> None:
+    """Apply the CRDs and wait until the API server has established them.
+
+    A CRD left behind in the ``Terminating`` state by an interrupted run refuses new
+    objects, and applying over it fails, so the suite settles that state before it
+    starts. Waiting for ``Established`` afterwards is what makes the first test's
+    assertion about the API server rather than about timing.
+    """
+    for name, path in CRDS.items():
+        deleting = _kubectl(
+            "get", "crd", name, "-o", "jsonpath={.metadata.deletionTimestamp}", check=False
+        )
+        if deleting.stdout.strip():
+            _wait_for(
+                f"{name} to finish terminating",
+                lambda crd=name: _json("get", "crd", crd) is None,
+                timeout=180,
+            )
+        _kubectl("apply", "-f", str(path))
+    for name in CRDS:
+        _wait_for(
+            f"{name} to be established",
+            lambda crd=name: any(
+                condition.get("type") == "Established" and condition.get("status") == "True"
+                for condition in ((_json("get", "crd", crd) or {}).get("status") or {}).get(
+                    "conditions", []
+                )
+            ),
+            timeout=180,
+        )
+
+
+def _delete_static_sets(namespace: str) -> None:
+    """Remove every StaticSet and wait for the nodes to be cleaned up.
+
+    The fixture used to delete the namespace, which removes the manager Pods too — and
+    a manifest on a node outlives the manager that would have removed it, leaving a
+    static Pod running that nothing tracks. Deleting the objects while the manager is
+    still alive is the only teardown that leaves the node as it was found.
+
+    Args:
+        namespace: The namespace under test.
+    """
+    names = [
+        item["metadata"]["name"] for item in _items(_json("get", "staticsets", "-n", namespace))
+    ]
+    for name in names:
+        _kubectl("delete", "staticset", name, "-n", namespace, "--timeout=180s", check=False)
 
 
 @requires_image_tooling
@@ -665,9 +735,15 @@ def test_a_static_set_is_placed_installed_mirrored_and_cleaned_up(
     pod_name = manifest_name.removesuffix(".yaml")
     _wait_for(
         "kubelet to publish the static Pod's mirror",
-        lambda: _mirror_pod(namespace, pod_name) is not None,
+        lambda: _mirror_for(namespace, name) is not None,
         timeout=300,
     )
+    mirror = _mirror_for(namespace, name)
+    assert mirror is not None
+    # kubelet registers the mirror under the manifest's name *plus the node's*, which is
+    # why nothing may look a mirror up by the name it wrote into the manifest.
+    assert mirror["metadata"]["name"] == f"{pod_name}-{node}"
+    assert mirror["status"]["phase"] == "Running", mirror
     _wait_for(
         "the placement to be acknowledged as installed",
         lambda: _installed(namespace, name),
@@ -696,7 +772,7 @@ def test_a_static_set_is_placed_installed_mirrored_and_cleaned_up(
     )
     _wait_for(
         "the mirror Pod to disappear",
-        lambda: _mirror_pod(namespace, pod_name) is None,
+        lambda: _mirror_for(namespace, name) is None,
         timeout=300,
     )
     assert _staticset(namespace, name) is None
@@ -787,4 +863,54 @@ def test_a_rollout_replaces_the_static_pod(deployed: dict[str, Any]) -> None:
     assert [item for item in _manifests_on(namespace, node) if item.startswith(f"{name}-")] != [
         first
     ]
+    _kubectl("delete", "staticset", name, "-n", namespace, check=False)
+
+
+@requires_image_tooling
+def test_a_surge_rollout_retires_the_previous_revision(deployed: dict[str, Any]) -> None:
+    """Under ``Surge`` the old manifest goes only once the new Pod is observed running.
+
+    That observation is what a mirror Pod is for, and it is where a name-based lookup
+    would silently never fire: kubelet publishes ``<name>-<node>``, so the retirement
+    would wait forever and the node would accumulate revisions.
+    """
+    namespace = deployed["namespace"]
+    node = deployed["node"]
+    name = f"surge-{uuid.uuid4().hex[:8]}"
+    _apply(
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "web-conf", "namespace": namespace},
+            "data": {"app.conf": "greeting=hello\n"},
+        }
+    )
+    body = static_set_body(name, namespace, image=deployed["image"], node=node)
+    body["spec"]["update"] = {"strategy": "Surge", "maxSurge": 1}
+    _apply(body)
+    _wait_for(
+        "the first revision to be installed",
+        lambda: _installed(namespace, name),
+        timeout=300,
+    )
+    first = _manifest_on(namespace, node, name)
+    assert first is not None
+
+    body["spec"]["template"]["spec"]["containers"][0]["env"][0] = {
+        "name": "GREETING",
+        "value": "changed",
+    }
+    _apply(body)
+
+    _wait_for(
+        "the previous revision to be retired once the new one runs",
+        lambda: (
+            [item for item in _manifests_on(namespace, node) if item.startswith(f"{name}-")]
+            == [item for item in [_manifest_on(namespace, node, name)] if item and item != first]
+        ),
+        timeout=300,
+    )
+    remaining = [item for item in _manifests_on(namespace, node) if item.startswith(f"{name}-")]
+    assert len(remaining) == 1
+    assert remaining[0] != first
     _kubectl("delete", "staticset", name, "-n", namespace, check=False)

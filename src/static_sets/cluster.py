@@ -19,6 +19,7 @@ from static_sets.api import (
     or_none,
 )
 from static_sets.manager import MirrorPod
+from static_sets.naming import ANNOTATION_REVISION, MIRROR_ANNOTATION, PLACEMENT_LABEL
 from static_sets.models import StaticSet
 from static_sets.placements import StaticPodPlacement
 
@@ -112,28 +113,44 @@ class ClusterApi:
             return None
         return {key: base64.b64decode(value) for key, value in (record.data or {}).items()}
 
-    def get_pod(self, namespace: str, name: str) -> MirrorPod | None:
-        """Return the mirror Pod kubelet published for a static Pod.
+    def get_mirror_pods(self, namespace: str, placement: str) -> tuple[MirrorPod, ...]:
+        """Return the mirror Pods kubelet published for one placement.
+
+        The lookup is by the placement's own label, because kubelet registers a static
+        Pod under a different name than the manifest's: ``<name>-<node name>``.
 
         Args:
             namespace: The namespace the static Pod's manifest declares.
-            name: The static Pod's name.
+            placement: The placement identity.
 
         Returns:
-            The mirror Pod, or ``None`` when kubelet has not published one.
+            The mirror Pods of that placement, newest name last.
 
         Raises:
             ApiUnavailableError: If the API could not be reached.
         """
-        record = or_none(self.client.core.read_namespaced_pod, name, namespace)
-        if record is None:
-            return None
-        containers = (record.status.container_statuses if record.status else None) or []
-        ready = all(container.ready for container in containers) if containers else None
-        return MirrorPod(
-            phase=(record.status.phase if record.status else None),
-            ready=ready,
+        items = (
+            self.client.core.list_namespaced_pod(
+                namespace, label_selector=f"{PLACEMENT_LABEL}={placement}"
+            ).items
+            or []
         )
+        mirrors: list[MirrorPod] = []
+        for record in items:
+            annotations = (record.metadata.annotations if record.metadata else None) or {}
+            if MIRROR_ANNOTATION not in annotations:
+                continue
+            containers = (record.status.container_statuses if record.status else None) or []
+            ready = all(container.ready for container in containers) if containers else None
+            mirrors.append(
+                MirrorPod(
+                    name=(record.metadata.name if record.metadata else None) or "",
+                    revision=annotations.get(ANNOTATION_REVISION),
+                    phase=(record.status.phase if record.status else None),
+                    ready=ready,
+                )
+            )
+        return tuple(sorted(mirrors, key=lambda pod: pod.name))
 
     def publish_status(self, namespace: str, name: str, payload: Mapping[str, str]) -> None:
         """Write a manager's report into a placement's status subresource.

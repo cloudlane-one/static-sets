@@ -53,7 +53,8 @@ class FakeApi:
         self.static_set = static_set
         self.config_maps = dict(config_maps or {"web-conf": {"app.conf": b"greeting=hello\n"}})
         self.secrets: dict[str, Mapping[str, bytes]] = dict(secrets or {})
-        self.pods: dict[str, MirrorPod] = {}
+        self.mirrors: dict[str, MirrorPod] = {}
+        """The mirror Pods kubelet published, keyed by the revision they mirror."""
         self.offline = False
 
     def get_static_set(self, namespace: str, name: str) -> StaticSet | None:
@@ -74,10 +75,22 @@ class FakeApi:
         self._check()
         return self.secrets.get(name)
 
-    def get_pod(self, namespace: str, name: str) -> MirrorPod | None:
-        """Return the mirror Pod kubelet published, if any."""
+    def get_mirror_pods(self, namespace: str, placement: str) -> tuple[MirrorPod, ...]:
+        """Return the mirror Pods of one placement.
+
+        kubelet names them ``<manifest name>-<node>``, so the name is deliberately
+        unrelated to what the manifest asked for: the manager must never depend on it.
+        """
         self._check()
-        return self.pods.get(name)
+        return tuple(
+            MirrorPod(
+                name=f"web-{placement}-{revision}-{NODE}",
+                revision=revision,
+                phase=pod.phase,
+                ready=pod.ready,
+            )
+            for revision, pod in self.mirrors.items()
+        )
 
     def _check(self) -> None:
         """Fail the way the client fails when the API is unreachable."""
@@ -200,7 +213,8 @@ def test_a_recreate_removes_the_old_manifest_before_the_new_one(
     assignment_ = assignment(manifests, bundle)
     first = reconcile(assignment_, api=api, now=NOW)
     assert first.static_pod_name is not None
-    api.pods[first.static_pod_name] = MirrorPod(phase="Running", ready=True)
+    assert first.revision is not None
+    api.mirrors[first.revision] = MirrorPod(phase="Running", ready=True)
 
     api.config_maps["web-conf"] = {"app.conf": b"greeting=goodbye\n"}
     second = reconcile(assignment_, api=api, now=NOW)
@@ -223,7 +237,8 @@ def test_surge_keeps_the_previous_revision_until_the_new_one_runs(
     assignment_ = assignment(manifests, bundle)
     first = reconcile(assignment_, api=api, now=NOW)
     assert first.static_pod_name is not None
-    api.pods[first.static_pod_name] = MirrorPod(phase="Running", ready=True)
+    assert first.revision is not None
+    api.mirrors[first.revision] = MirrorPod(phase="Running", ready=True)
     api.config_maps["web-conf"] = {"app.conf": b"greeting=goodbye\n"}
 
     second = reconcile(assignment_, api=api, now=NOW)
@@ -236,7 +251,8 @@ def test_surge_keeps_the_previous_revision_until_the_new_one_runs(
 
     # Once kubelet reports the new Pod running, the previous manifest is retired.
     assert second.static_pod_name is not None
-    api.pods[second.static_pod_name] = MirrorPod(phase="Running", ready=True)
+    assert second.revision is not None
+    api.mirrors[second.revision] = MirrorPod(phase="Running", ready=True)
     third = reconcile(assignment_, api=api, now=NOW)
 
     assert manifest_files(manifests) == [f"{second.static_pod_name}.yaml"]
@@ -300,13 +316,15 @@ def test_an_idle_pass_finishes_a_leftover_retirement(
     assignment_ = assignment(manifests, bundle)
     first = reconcile(assignment_, api=api, now=NOW)
     assert first.static_pod_name is not None
-    api.pods[first.static_pod_name] = MirrorPod(phase="Running", ready=True)
+    assert first.revision is not None
+    api.mirrors[first.revision] = MirrorPod(phase="Running", ready=True)
     api.config_maps["web-conf"] = {"app.conf": b"greeting=goodbye"}
     second = reconcile(assignment_, api=api, now=NOW)
     assert second.static_pod_name is not None
 
     # kubelet reports the new Pod running, so the next idle pass retires the old one.
-    api.pods[second.static_pod_name] = MirrorPod(phase="Running", ready=True)
+    assert second.revision is not None
+    api.mirrors[second.revision] = MirrorPod(phase="Running", ready=True)
     third = reconcile(assignment_, api=api, now=NOW)
 
     assert manifest_files(manifests) == [f"{second.static_pod_name}.yaml"]
@@ -401,7 +419,8 @@ def test_cleanup_waits_while_the_workload_may_still_run(
     assignment_ = assignment(manifests, bundle)
     installed = reconcile(assignment_, api=api, now=NOW)
     assert installed.static_pod_name is not None
-    api.pods[installed.static_pod_name] = MirrorPod(phase="Running", ready=True)
+    assert installed.revision is not None
+    api.mirrors[installed.revision] = MirrorPod(phase="Running", ready=True)
 
     first = cleanup(assignment_, api=api, now=NOW, reason="ScaledDown", remove_configuration=True)
 
@@ -410,7 +429,7 @@ def test_cleanup_waits_while_the_workload_may_still_run(
     assert manifest_files(manifests) == []
     assert (bundle / "placements" / assignment_.identity / "revisions").exists()
 
-    del api.pods[installed.static_pod_name]
+    del api.mirrors[installed.revision]
     second = cleanup(assignment_, api=api, now=NOW, reason="ScaledDown", remove_configuration=True)
 
     assert second.acknowledged is True

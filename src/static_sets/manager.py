@@ -163,18 +163,22 @@ class PlacementApi(Protocol):
         """
         ...
 
-    def get_pod(self, namespace: str, name: str) -> MirrorPod | None:
-        """Return the mirror Pod kubelet published for a static Pod.
+    def get_mirror_pods(self, namespace: str, placement: str) -> tuple[MirrorPod, ...]:
+        """Return the mirror Pods kubelet published for one placement.
 
-        The mirror Pod is the only proof that kubelet accepted a manifest, so it is
-        what a ``Surge`` rollout waits for and what a cleanup waits to disappear.
+        A mirror Pod is the only proof that kubelet accepted a manifest, so it is what
+        a ``Surge`` rollout waits for and what a cleanup waits to disappear.
+
+        They are found by the placement's own label, never by name: kubelet registers a
+        static Pod under ``<metadata.name>-<node name>``, so the name in the manifest is
+        not the name of the object it publishes.
 
         Args:
             namespace: The namespace the static Pod's manifest declares.
-            name: The static Pod's name.
+            placement: The placement identity.
 
         Returns:
-            The mirror Pod, or ``None`` when kubelet has not published one.
+            Every mirror Pod of that placement, possibly none.
 
         Raises:
             ApiUnavailableError: If the API cannot be reached.
@@ -281,11 +285,16 @@ class MirrorPod:
     """What a manager observes about a static Pod's mirror.
 
     Attributes:
+        name: The object's name, which kubelet derives from the manifest's name and the
+            node's — useful for reporting, never used to find it.
+        revision: The revision the mirrored manifest was rendered from.
         phase: The mirror Pod's phase.
         ready: Whether every container reports ``Ready``. ``None`` when the Pod has
             no container statuses yet.
     """
 
+    name: str = ""
+    revision: str | None = None
     phase: str | None = None
     ready: bool | None = None
 
@@ -608,16 +617,17 @@ def _terminated(api: PlacementApi, assignment: Assignment, revisions: tuple[str,
         revisions: The revisions whose mirror Pods to look for.
 
     Returns:
-        ``True`` when every revision's workload may be treated as gone.
+        ``True`` when none of those revisions is still mirrored.
 
     Raises:
         ApiUnavailableError: If the API cannot be reached.
     """
-    for revision in revisions:
-        name = static_pod_name(assignment.static_set, assignment.identity, revision)
-        if api.get_pod(assignment.namespace, name) is not None:
-            return False
-    return True
+    if not revisions:
+        return True
+    present = {
+        pod.revision for pod in api.get_mirror_pods(assignment.namespace, assignment.identity)
+    }
+    return not present & set(revisions)
 
 
 def _resolve(
@@ -838,16 +848,19 @@ def _mirror_ready(api: PlacementApi, assignment: Assignment, revision: str) -> b
         revision: The revision whose mirror Pod to look for.
 
     Returns:
-        ``True`` when the mirror Pod exists and all of its containers are ready.
+        ``True`` when a mirror Pod for that revision exists and all of its containers
+        are ready. A mirror that is merely ``Running`` without container statuses yet
+        counts too, because kubelet publishes the Pod before it has started anything.
     """
-    name = static_pod_name(assignment.static_set, assignment.identity, revision)
     try:
-        pod = api.get_pod(assignment.namespace, name)
+        pods = api.get_mirror_pods(assignment.namespace, assignment.identity)
     except ApiUnavailableError:
         return False
-    if pod is None:
-        return False
-    return pod.ready is True or (pod.ready is None and pod.phase == "Running")
+    return any(
+        pod.revision == revision
+        and (pod.ready is True or (pod.ready is None and pod.phase == "Running"))
+        for pod in pods
+    )
 
 
 def _confirm_images(
